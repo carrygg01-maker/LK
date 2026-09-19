@@ -105,9 +105,7 @@ def h2_cross_sectional_carry(klines_1h: dict[str, pd.DataFrame],
 
 
 # ══════════════════════════════════════════════════════════════════ H3
-def h3_asia_session(klines_1h: dict[str, pd.DataFrame],
-                    symbol: str = "BTCUSDT",
-                    move_thresh: float = 0.015) -> pd.Series:
+def _asia_one(kl: pd.DataFrame, move_thresh: float) -> pd.Series:
     """
     H3 — ช่องว่างภูมิศาสตร์ (สนามที่คุณอยู่)
     US session (UTC 13-21) เคลื่อนแรง -> Asia session (UTC 00-08 = 07:00-15:00 ICT)
@@ -116,7 +114,6 @@ def h3_asia_session(klines_1h: dict[str, pd.DataFrame],
 
     Null: return ช่วง Asia ไม่ขึ้นกับ return ของ US session คืนก่อนหน้า
     """
-    kl = klines_1h.get(symbol)
     if kl is None or kl.empty:
         return pd.Series(dtype=float)
     c = kl["close"]
@@ -142,6 +139,22 @@ def h3_asia_session(klines_1h: dict[str, pd.DataFrame],
     big = df[df["us_ret"].abs() > move_thresh]
     # สมมติฐาน: Asia ย้อนกลับทิศของ US move (รีเทลเอเชียขายรับ/ซื้อรับ)
     return (-np.sign(big["us_ret"]) * big["asia_ret_next"]).sort_index()
+
+
+def h3_asia_session(klines_1h: dict[str, pd.DataFrame],
+                    move_thresh: float = 0.015,
+                    max_coins: int = 15) -> pd.Series:
+    """
+    รวมหลายเหรียญ ไม่ใช่ BTC ตัวเดียว
+    เหตุผล: BTC ให้ n แค่ ~200 ไม้ใน 5 ปี ซึ่งน้อยเกินกว่าจะสรุปอะไรได้
+    (ผล synthetic ฟ้องชัด: n=178 -> ไม่มีทางผ่านเกณฑ์แม้ edge มีจริง)
+    """
+    rows = []
+    for sym in list(klines_1h)[:max_coins]:
+        r = _asia_one(klines_1h[sym], move_thresh)
+        if len(r):
+            rows.append(r)
+    return pd.concat(rows).sort_index() if rows else pd.Series(dtype=float)
 
 
 # ══════════════════════════════════════════════════════════════════ H4
@@ -179,9 +192,7 @@ def h4_new_listing(klines_1h: dict[str, pd.DataFrame],
 
 
 # ══════════════════════════════════════════════════════════════════ H5
-def h5_weekend_overshoot(klines_1h: dict[str, pd.DataFrame],
-                         symbol: str = "BTCUSDT",
-                         move_thresh: float = 0.02) -> pd.Series:
+def _weekend_one(kl: pd.DataFrame, move_thresh: float) -> pd.Series:
     """
     H5 — สุดสัปดาห์ liquidity หาย สถาบันไม่อยู่ market maker ลด inventory
     ของถูกบังคับให้เคลื่อนแรงเกินจริงเพราะไม่มีใครรับ -> จันทร์ควรย้อนกลับ
@@ -190,7 +201,6 @@ def h5_weekend_overshoot(klines_1h: dict[str, pd.DataFrame],
     Entry: เสาร์ 00:00 UTC ถึง จันทร์ 00:00 UTC = weekend move
            ถือ จันทร์ 00:00 -> อังคาร 00:00 ทิศตรงข้าม
     """
-    kl = klines_1h.get(symbol)
     if kl is None or kl.empty:
         return pd.Series(dtype=float)
     d = kl["close"].resample("1D").last().dropna()
@@ -209,6 +219,25 @@ def h5_weekend_overshoot(klines_1h: dict[str, pd.DataFrame],
     if not out:
         return pd.Series(dtype=float)
     return pd.Series(dict(out)).sort_index()
+
+
+def h5_weekend_overshoot(klines_1h: dict[str, pd.DataFrame],
+                         move_thresh: float = 0.02,
+                         max_coins: int = 15) -> pd.Series:
+    """
+    รวมหลายเหรียญ — สุดสัปดาห์มีแค่ 52 ครั้ง/ปี ใช้เหรียญเดียวไม่มีวันพอ
+    (synthetic ให้ OOS n=28 ซึ่งบอกอะไรไม่ได้เลย)
+
+    ข้อควรระวัง: เหรียญต่างๆ เคลื่อนไปทางเดียวกันในสุดสัปดาห์เดียวกัน
+    n ที่เพิ่มขึ้นจึงไม่ได้แปลว่าข้อมูลอิสระเพิ่มขึ้นตามสัดส่วน
+    block bootstrap ช่วยชดเชยตรงนี้บางส่วน แต่ให้ตีความ t-stat อย่างระมัดระวัง
+    """
+    rows = []
+    for sym in list(klines_1h)[:max_coins]:
+        r = _weekend_one(klines_1h[sym], move_thresh)
+        if len(r):
+            rows.append(r)
+    return pd.concat(rows).sort_index() if rows else pd.Series(dtype=float)
 
 
 # ══════════════════════════════════════════════════════════════════ H6

@@ -73,23 +73,29 @@ def build_synthetic(n_coins=20, days=900, seed=11, edge_bps=0.0):
                 {"rate": rng.normal(0.0001, 0.0004, len(fidx))}, index=fidx)
         onboard[sym] = idx[0] + pd.Timedelta(days=int(rng.integers(0, 300)))
     btc = perp["BTCUSDT"]
-    return perp, spot, fund, pd.Series(onboard), btc
+    return perp, spot, fund, pd.Series(onboard), btc, perp
 
 
 # ───────────────────────────────────────────────────────────── real data load
-def load_real(n_coins: int, start: str):
+def load_real(n_coins: int, start: str, n_new: int = 60):
+    """
+    โหลดสองกลุ่ม เพราะสมมติฐานต่างกันต้องการเหรียญคนละแบบ:
+      * เหรียญเก่า n_coins ตัว  -> ประวัติยาว ใช้กับ H1/H2/H3/H5/H6
+      * เหรียญใหม่ n_new ตัว    -> ใช้กับ H4 เท่านั้น ดึงแค่ 30 วันแรกหลัง list
+    """
     import data as D
-    print(f"→ ดึงรายชื่อ perpetual ...")
+    print("→ ดึงรายชื่อ perpetual ...")
     uni = D.perp_symbols()
     uni = uni[~uni["symbol"].str.contains("USDC|1000000", regex=True)]
-    syms = uni["symbol"].head(n_coins).tolist()
-    if "BTCUSDT" not in syms:
-        syms.insert(0, "BTCUSDT")
     onboard = uni.set_index("symbol")["onboard"]
 
+    old_syms = uni["symbol"].head(n_coins).tolist()          # เรียงตาม onboard เก่า->ใหม่
+    if "BTCUSDT" not in old_syms:
+        old_syms.insert(0, "BTCUSDT")
+
     perp, spot, fund = {}, {}, {}
-    for i, s in enumerate(syms, 1):
-        print(f"  [{i}/{len(syms)}] {s}")
+    for i, s in enumerate(old_syms, 1):
+        print(f"  [{i}/{len(old_syms)}] {s}")
         try:
             perp[s] = D.klines(s, "1h", start, market="futures")
             fund[s] = D.funding(s, start)
@@ -100,7 +106,25 @@ def load_real(n_coins: int, start: str):
         except Exception as e:  # noqa: BLE001
             print(f"      ข้าม ({e})")
     btc = perp.get("BTCUSDT", pd.DataFrame())
-    return perp, spot, fund, onboard, btc
+
+    # --- เหรียญใหม่ สำหรับ H4 ---
+    new_syms = [x for x in uni["symbol"].tail(n_new).tolist() if x not in perp]
+    print(f"→ ดึงเหรียญที่เพิ่ง list {len(new_syms)} ตัว (สำหรับ H4)")
+    listing = {}
+    for i, s in enumerate(new_syms, 1):
+        t0 = onboard[s]
+        if t0 > pd.Timestamp.utcnow().tz_localize("UTC") - pd.Timedelta(days=20):
+            continue                                   # ยังไม่ครบ 14 วัน ข้ามไป
+        try:
+            kl = D.klines(s, "1h", t0.strftime("%Y-%m-%d"),
+                          end=(t0 + pd.Timedelta(days=20)).strftime("%Y-%m-%d"),
+                          market="futures")
+            if not kl.empty:
+                listing[s] = kl
+            print(f"  [{i}/{len(new_syms)}] {s}  {len(kl)} แท่ง")
+        except Exception as e:  # noqa: BLE001
+            print(f"      ข้าม {s} ({e})")
+    return perp, spot, fund, onboard, btc, listing
 
 
 # ────────────────────────────────────────────────────────────────── evaluate
@@ -122,6 +146,8 @@ def run_one(name: str, series: pd.Series, horizon: str) -> tuple[S.Result, S.Res
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--coins", type=int, default=40)
+    ap.add_argument("--new-coins", type=int, default=80,
+                    help="จำนวนเหรียญที่เพิ่ง list สำหรับ H4 (ดึงแค่ 20 วันแรก เร็ว)")
     ap.add_argument("--start", default="2021-01-01")
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--edge-bps", type=float, default=0.0,
@@ -131,9 +157,9 @@ def main():
 
     if a.synthetic:
         print("โหมด SYNTHETIC — ข้อมูลสุ่มล้วน ไม่มี edge ซ่อนอยู่")
-        perp, spot, fund, onboard, btc = build_synthetic(edge_bps=a.edge_bps)
+        perp, spot, fund, onboard, btc, listing = build_synthetic(edge_bps=a.edge_bps)
     else:
-        perp, spot, fund, onboard, btc = load_real(a.coins, a.start)
+        perp, spot, fund, onboard, btc, listing = load_real(a.coins, a.start, a.new_coins)
 
     names = a.only or list(H.REGISTRY)
     results = []
@@ -149,7 +175,7 @@ def main():
             elif name == "H3_asia_session":
                 s = fn(perp)
             elif name == "H4_new_listing":
-                s = fn(perp, onboard, btc)
+                s = fn(listing, onboard, btc)
             elif name == "H5_weekend":
                 s = fn(perp)
             elif name == "H6_basis":

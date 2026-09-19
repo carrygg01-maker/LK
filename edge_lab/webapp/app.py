@@ -56,8 +56,9 @@ def _build_argv(payload: dict) -> list[str]:
             argv += ["--edge-bps", str(float(edge_bps))]
     else:
         coins = int(payload.get("coins", 40))
+        new_coins = int(payload.get("new_coins", 80))
         start = str(payload.get("start", "2021-01-01"))
-        argv += ["--coins", str(coins), "--start", start]
+        argv += ["--coins", str(coins), "--new-coins", str(new_coins), "--start", start]
     only = payload.get("only") or []
     only = [o for o in only if o in H.REGISTRY]
     if only:
