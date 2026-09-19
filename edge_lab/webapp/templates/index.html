@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Edge Lab</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, "Noto Sans Thai", sans-serif; max-width: 900px;
+         margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { margin-bottom: .2rem; }
+  .sub { color: #888; margin-top: 0; }
+  fieldset { border: 1px solid #ccc4; border-radius: 8px; margin: 1rem 0; padding: 1rem; }
+  legend { padding: 0 .5rem; font-weight: 600; }
+  label { display: block; margin: .4rem 0; }
+  .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 180px; }
+  input[type=number], input[type=date], input[type=text] {
+    width: 100%; padding: .4rem; box-sizing: border-box; }
+  .hyp { display: flex; align-items: baseline; gap: .5rem; }
+  .hyp input { width: auto; }
+  button { padding: .6rem 1.2rem; font-size: 1rem; border-radius: 6px; border: 1px solid #444;
+           cursor: pointer; background: #222; color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #log { background: #111; color: #0f0; font-family: monospace; font-size: .85rem;
+         padding: .8rem; border-radius: 6px; height: 260px; overflow-y: auto;
+         white-space: pre-wrap; display: none; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .9rem; }
+  th, td { border: 1px solid #ccc4; padding: .35rem .5rem; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  tr.pass { background: #1b5e2033; }
+  tr.fail-oos { background: #7f1d1d22; }
+  #status { font-weight: 600; margin-top: .5rem; }
+  #reportBox { white-space: pre-wrap; font-size: .9rem; }
+  .links a { margin-right: 1rem; }
+  .hint { color: #888; font-size: .85rem; }
+</style>
+</head>
+<body>
+  <h1>Edge Lab</h1>
+  <p class="sub">รันสมมติฐาน H1–H6 แล้วดูว่า edge ไหนผ่านเกณฑ์จริง (OOS + bootstrap CI + cost-adjusted)</p>
+
+  <form id="runForm">
+    <fieldset>
+      <legend>โหมด</legend>
+      <label class="hyp"><input type="radio" name="mode" value="synthetic" checked> Synthetic — ข้อมูลสุ่ม ไม่ต้องต่อเน็ต (เช็คว่าโค้ดทำงานถูก)</label>
+      <label class="hyp"><input type="radio" name="mode" value="real"> ข้อมูลจริงจาก Binance (ต้องต่อเน็ต ใช้เวลา 20-40 นาทีรอบแรก)</label>
+
+      <div id="syntheticOpts" class="row">
+        <div>
+          <label for="edge_bps">ฝัง edge ไว้ (bps) — 0 = ไม่มี edge เลย</label>
+          <input type="number" id="edge_bps" value="0" step="1" min="0">
+        </div>
+      </div>
+
+      <div id="realOpts" class="row" style="display:none">
+        <div>
+          <label for="coins">จำนวนเหรียญ</label>
+          <input type="number" id="coins" value="40" min="1" max="300">
+        </div>
+        <div>
+          <label for="start">เริ่มตั้งแต่วันที่</label>
+          <input type="date" id="start" value="2021-01-01">
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>เลือกสมมติฐาน (ไม่เลือกเลย = รันทุกข้อ)</legend>
+      {% for key, spec in hypotheses %}
+      <label class="hyp">
+        <input type="checkbox" name="only" value="{{ key }}">
+        <span><b>{{ key }}</b> — {{ spec.desc }}</span>
+      </label>
+      {% endfor %}
+    </fieldset>
+
+    <button type="submit" id="runBtn">รัน</button>
+    <span class="hint" id="lockHint"></span>
+  </form>
+
+  <p id="status"></p>
+  <pre id="log"></pre>
+
+  <div id="resultsWrap" style="display:none">
+    <h2>ผลลัพธ์</h2>
+    <table id="resultsTable">
+      <thead>
+        <tr><th>name</th><th>n</th><th>mean_bps</th><th>ci_low</th><th>ci_high</th>
+            <th>t</th><th>sharpe</th><th>hit%</th><th>max_dd</th><th>passed</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2>รายงาน (report.md)</h2>
+    <div id="reportBox"></div>
+
+    <p class="links">
+      <a href="/download/results.csv">ดาวน์โหลด results.csv</a>
+      <a href="/download/report.md">ดาวน์โหลด report.md</a>
+    </p>
+  </div>
+
+<script>
+const form = document.getElementById('runForm');
+const runBtn = document.getElementById('runBtn');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const resultsWrap = document.getElementById('resultsWrap');
+const tbody = document.querySelector('#resultsTable tbody');
+const reportBox = document.getElementById('reportBox');
+const lockHint = document.getElementById('lockHint');
+
+document.querySelectorAll('input[name=mode]').forEach(r => {
+  r.addEventListener('change', () => {
+    const isReal = document.querySelector('input[name=mode]:checked').value === 'real';
+    document.getElementById('realOpts').style.display = isReal ? 'flex' : 'none';
+    document.getElementById('syntheticOpts').style.display = isReal ? 'none' : 'flex';
+  });
+});
+
+let poller = null;
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const mode = document.querySelector('input[name=mode]:checked').value;
+  const only = Array.from(document.querySelectorAll('input[name=only]:checked')).map(c => c.value);
+  const payload = { mode, only };
+  if (mode === 'synthetic') {
+    payload.edge_bps = parseFloat(document.getElementById('edge_bps').value || '0');
+  } else {
+    payload.coins = parseInt(document.getElementById('coins').value || '40', 10);
+    payload.start = document.getElementById('start').value || '2021-01-01';
+  }
+
+  runBtn.disabled = true;
+  lockHint.textContent = '';
+  resultsWrap.style.display = 'none';
+  logEl.style.display = 'block';
+  logEl.textContent = '';
+  statusEl.textContent = 'กำลังเริ่มงาน...';
+
+  const res = await fetch('/api/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (res.status === 409) {
+    const j = await res.json();
+    statusEl.textContent = j.error;
+    runBtn.disabled = false;
+    return;
+  }
+  const { job_id } = await res.json();
+  poller = setInterval(() => poll(job_id), 1500);
+});
+
+async function poll(jobId) {
+  const res = await fetch('/api/status/' + jobId);
+  if (!res.ok) return;
+  const job = await res.json();
+  logEl.textContent = job.log.join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
+
+  if (job.status === 'running' || job.status === 'queued') {
+    statusEl.textContent = job.status === 'queued' ? 'อยู่ในคิว...' : 'กำลังรัน...';
+    return;
+  }
+  clearInterval(poller);
+  runBtn.disabled = false;
+
+  if (job.status === 'error') {
+    statusEl.textContent = 'ผิดพลาด: ' + job.error;
+    return;
+  }
+
+  statusEl.textContent = 'เสร็จแล้ว';
+  if (job.table) renderTable(job.table);
+  if (job.report_md) reportBox.textContent = job.report_md;
+  resultsWrap.style.display = 'block';
+}
+
+function renderTable(rows) {
+  tbody.innerHTML = '';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const isOos = String(r.name).includes('[OOS]');
+    if (r.passed) tr.className = 'pass';
+    else if (isOos) tr.className = 'fail-oos';
+    tr.innerHTML = `<td>${r.name}</td><td>${r.n}</td><td>${r.mean_bps}</td>
+      <td>${r.ci_low_bps}</td><td>${r.ci_high_bps}</td><td>${r.tstat}</td>
+      <td>${r.sharpe}</td><td>${r.hit_rate}</td><td>${r.max_dd}</td>
+      <td>${r.passed ? '✓' : '✗'}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+</script>
+</body>
+</html>

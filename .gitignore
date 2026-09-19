@@ -4,3 +4,4 @@ edge_lab/report.md
 edge_lab/results.csv
 edge_lab/collect.log
 edge_lab/*.parquet
+edge_lab/cache/
