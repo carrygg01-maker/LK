@@ -5,3 +5,5 @@ edge_lab/results.csv
 edge_lab/collect.log
 edge_lab/*.parquet
 edge_lab/cache/
+tiktok_lab/.tokens.json
+tiktok_lab/competitors.json

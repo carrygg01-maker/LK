@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TikTok Lab</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; --muted: #888; --accent: #fe2c55; --good: #1b5e2033; }
+  body { font-family: -apple-system, "Noto Sans Thai", sans-serif; max-width: 1100px;
+         margin: 1.5rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { margin-bottom: .2rem; }
+  .sub { color: var(--muted); margin-top: 0; }
+  #banner { padding: .5rem .8rem; border-radius: 6px; margin: .5rem 0 1rem; font-size: .9rem;
+            background: #f59e0b22; border: 1px solid #f59e0b66; }
+  nav { display: flex; gap: .3rem; border-bottom: 1px solid var(--line); margin-bottom: 1rem; flex-wrap: wrap; }
+  nav button { background: none; border: none; padding: .6rem 1rem; cursor: pointer; font-size: 1rem;
+               color: inherit; border-bottom: 3px solid transparent; }
+  nav button.on { border-bottom-color: var(--accent); font-weight: 600; }
+  section { display: none; } section.on { display: block; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .7rem; margin-bottom: 1rem; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: .7rem; }
+  .card .k { color: var(--muted); font-size: .8rem; } .card .v { font-size: 1.4rem; font-weight: 600; }
+  .up { color: #16a34a; } .down { color: #dc2626; }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; margin: .5rem 0 1.2rem;
+          display: block; overflow-x: auto; }
+  table tbody { display: table; width: 100%; border-collapse: collapse; }
+  th, td { border: 1px solid var(--line); padding: .3rem .5rem; text-align: right; vertical-align: top; }
+  th { cursor: default; } td.l, th.l { text-align: left; }
+  tr.hot { background: var(--good); }
+  .heat { display: grid; grid-template-columns: 3rem repeat(8, 1fr); gap: 2px; font-size: .75rem; margin-bottom: 1rem; }
+  .heat div { padding: .35rem .2rem; text-align: center; border-radius: 3px; }
+  .heat .h { color: var(--muted); }
+  input[type=text], input[type=number], select, textarea { padding: .45rem; box-sizing: border-box;
+         border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+  .row { display: flex; gap: .6rem; flex-wrap: wrap; align-items: end; margin-bottom: .8rem; }
+  .row label { display: flex; flex-direction: column; font-size: .85rem; gap: .2rem; }
+  button.go { padding: .5rem 1.1rem; border-radius: 6px; border: none; background: var(--accent);
+              color: #fff; cursor: pointer; font-size: .95rem; }
+  button.go:disabled { opacity: .5; cursor: wait; }
+  button.x { background: none; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; color: inherit; }
+  .chips > span { display: inline-flex; gap: .3rem; align-items: center; border: 1px solid var(--line);
+                border-radius: 999px; padding: .15rem .6rem; margin: .15rem; font-size: .85rem; }
+  .chips span.link { cursor: pointer; }
+  .err { color: #dc2626; white-space: pre-wrap; }
+  .hint { color: var(--muted); font-size: .82rem; }
+  .desc { max-width: 420px; text-align: left; }
+  .bar { height: 8px; background: var(--accent); border-radius: 4px; min-width: 2px; }
+  .ai-out h3 { margin: 1rem 0 .3rem; } .ai-out li { margin: .2rem 0; }
+  .copy { cursor: pointer; } .copy:hover { text-decoration: underline dotted; }
+  @media (max-width: 640px) { .desc { max-width: 200px; } table { font-size: .78rem; } }
+</style>
+</head>
+<body>
+  <h1>TikTok Lab</h1>
+  <p class="sub">วิเคราะห์ช่อง · ส่องคู่แข่ง · หา outlier · วิจัย hashtag · AI ช่วยเขียน</p>
+  <div id="banner" hidden></div>
+
+  <nav>
+    <button data-tab="me" class="on">ช่องของฉัน</button>
+    <button data-tab="comp">คู่แข่ง + Outliers</button>
+    <button data-tab="tags">Hashtag</button>
+    <button data-tab="ai">AI ช่วยเขียน</button>
+  </nav>
+
+  <!-- ช่องของฉัน -->
+  <section id="me" class="on">
+    <div id="meBody">กำลังโหลด…</div>
+  </section>
+
+  <!-- คู่แข่ง -->
+  <section id="comp">
+    <div class="row">
+      <label>เพิ่มบัญชีคู่แข่ง (@ชื่อ หรือลิงก์โปรไฟล์)
+        <input type="text" id="compInput" placeholder="@username" size="28"></label>
+      <button class="go" id="compAdd">เพิ่ม</button>
+      <label>ย้อนหลัง (วัน) <input type="number" id="compDays" value="90" min="7" max="180" style="width:6rem"></label>
+      <label>outlier ขั้นต่ำ (x) <input type="number" id="compMinX" value="3" min="1.5" step="0.5" style="width:6rem"></label>
+      <button class="go" id="compRun">หา outlier</button>
+    </div>
+    <div class="chips" id="compList"></div>
+    <p class="hint">คลิกชื่อบัญชีเพื่อดูรายละเอียด · outlier = วิวคลิปนั้น ÷ median วิวของบัญชีเดียวกัน</p>
+    <div id="compBody"></div>
+  </section>
+
+  <!-- Hashtag -->
+  <section id="tags">
+    <div class="row">
+      <label>hashtag (คั่นด้วย ,)
+        <input type="text" id="tagInput" placeholder="สูตรอาหาร, ทำอาหาร" size="34"></label>
+      <label>ย้อนหลัง (วัน) <input type="number" id="tagDays" value="30" min="1" max="90" style="width:6rem"></label>
+      <button class="go" id="tagRun">วิเคราะห์</button>
+    </div>
+    <div id="tagBody"><p class="hint">ใช้ Research API — ดึงคลิปสาธารณะที่ใช้แท็กนี้ แล้วดูว่าแท็กไหนมักใช้คู่กันและได้วิวดีกว่า</p></div>
+  </section>
+
+  <!-- AI -->
+  <section id="ai">
+    <div class="row">
+      <label style="flex:1;min-width:260px">หัวข้อคลิป
+        <input type="text" id="aiTopic" placeholder="เช่น ข้าวผัดกระเพรา 5 นาที ไม่ต้องใช้เตา"></label>
+      <label>กลุ่มเนื้อหา <input type="text" id="aiNiche" placeholder="อาหาร / ความงาม / การเงิน" size="18"></label>
+      <label>โทน
+        <select id="aiTone"><option>เป็นกันเอง</option><option>ตลก</option><option>มืออาชีพ</option>
+          <option>ดราม่า/เล่าเรื่อง</option><option>สอน/ให้ความรู้</option></select></label>
+      <label>ความยาว (วิ) <input type="number" id="aiLen" value="30" min="5" max="600" style="width:5rem"></label>
+    </div>
+    <div class="row">
+      <label style="flex-direction:row;align-items:center;gap:.4rem">
+        <input type="checkbox" id="aiUseData" checked> ใช้ข้อมูลช่องของฉัน (hashtag ที่ได้ผล + คลิป outlier) เป็นบริบท</label>
+      <button class="go" id="aiRun">สร้าง</button>
+    </div>
+    <div id="aiBody" class="ai-out"></div>
+  </section>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = n => n == null ? "–" : n >= 1e6 ? (n/1e6).toFixed(1)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"K" : Math.round(n).toString();
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(url, opts) {
+  const r = await fetch(url, opts);
+  const j = await r.json().catch(() => ({error: "ตอบกลับไม่ใช่ JSON"}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button, section").forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); $("#" + b.dataset.tab).classList.add("on");
+  try { localStorage.setItem("tab", b.dataset.tab); } catch (e) {}
+});
+try { const t = localStorage.getItem("tab"); if (t) document.querySelector(`nav button[data-tab="${t}"]`)?.click(); } catch (e) {}
+
+// ---------- ส่วนแสดงผลที่ใช้ร่วมกัน ----------
+function cards(s) {
+  const a = s.account, t = s.trend_pct;
+  return `<div class="cards">
+    <div class="card"><div class="k">@${esc(a.username)}</div><div class="v">${esc(a.display_name || a.username)}</div></div>
+    <div class="card"><div class="k">ผู้ติดตาม</div><div class="v">${fmt(a.followers)}</div></div>
+    <div class="card"><div class="k">median วิว/คลิป</div><div class="v">${fmt(s.median_views)}</div></div>
+    <div class="card"><div class="k">median engagement</div><div class="v">${s.median_er.toFixed(1)}%</div></div>
+    <div class="card"><div class="k">โพสต์ 30 วันล่าสุด</div><div class="v">${s.posts_last30}</div></div>
+    <div class="card"><div class="k">median วิว 30 วัน vs ก่อนหน้า</div>
+      <div class="v ${t > 0 ? "up" : t < 0 ? "down" : ""}">${t == null ? "–" : (t > 0 ? "+" : "") + t + "%"}</div></div>
+    <div class="card"><div class="k">คลิป outlier (≥3x)</div><div class="v">${s.outlier_count}</div></div>
+  </div>`;
+}
+
+function videoTable(vs, withUser) {
+  if (!vs.length) return `<p class="hint">ไม่มีคลิป</p>`;
+  return `<table><tr>${withUser ? '<th class="l">บัญชี</th>' : ""}<th class="l">คลิป</th><th>โพสต์</th><th>วิว</th>
+    <th>outlier</th><th>ER%</th><th>แชร์%</th><th>ยาว</th></tr>` +
+    vs.map(v => `<tr class="${v.outlier >= 3 ? "hot" : ""}">
+      ${withUser ? `<td class="l">@${esc(v.username)}</td>` : ""}
+      <td class="desc">${v.share_url ? `<a href="${esc(v.share_url)}" target="_blank" rel="noopener">${esc(v.desc.slice(0, 110) || "(ไม่มีคำอธิบาย)")}</a>` : esc(v.desc.slice(0, 110))}</td>
+      <td>${esc(v.posted)}</td><td>${fmt(v.views)}</td><td><b>${v.outlier}x</b></td>
+      <td>${v.er}</td><td>${v.share_rate}</td><td>${v.duration}s</td></tr>`).join("") + `</table>`;
+}
+
+function heatmap(bt) {
+  const all = bt.cells.flat().map(c => c.median).filter(x => x != null);
+  const max = Math.max(1, ...all);
+  let h = `<div class="heat"><div></div>${bt.blocks.map(b => `<div class="h">${b}</div>`).join("")}`;
+  bt.cells.forEach((row, d) => {
+    h += `<div class="h">${bt.days[d]}</div>` + row.map(c => c.median == null
+      ? `<div class="h" title="n=${c.n}">·</div>`
+      : `<div title="median ${fmt(c.median)} วิว, n=${c.n}" style="background:rgba(254,44,85,${(0.12 + 0.8 * c.median / max).toFixed(2)})">${fmt(c.median)}</div>`).join("");
+  });
+  const best = bt.best_hours.map(b => `${String(b.hour).padStart(2, "0")}:00 (median ${fmt(b.median)}, n=${b.n})`).join(" · ");
+  return h + `</div><p class="hint">ชั่วโมงที่ดีที่สุด: ${best || "ข้อมูลยังน้อยเกินไป"} · ช่องที่มี “·” = คลิปน้อยกว่า 3 คลิป</p>`;
+}
+
+function tagTable(rows) {
+  if (!rows.length) return `<p class="hint">ยังไม่มี hashtag ที่ใช้ซ้ำพอจะสรุปได้</p>`;
+  const max = Math.max(...rows.map(r => r.lift));
+  return `<table><tr><th class="l">hashtag</th><th>คลิป</th><th>median วิว</th><th>median ER%</th><th>lift</th><th class="l"></th></tr>` +
+    rows.map(r => `<tr><td class="l copy" title="คลิกเพื่อคัดลอก" onclick="navigator.clipboard?.writeText('#${esc(r.tag)}')">#${esc(r.tag)}${r.generic ? ' <span class="hint">(แท็กกว้าง)</span>' : ""}</td>
+      <td>${r.n}</td><td>${fmt(r.median_views)}</td><td>${r.median_er.toFixed(1)}</td><td><b>${r.lift}x</b></td>
+      <td class="l" style="width:22%"><div class="bar" style="width:${(r.lift / max * 100).toFixed(0)}%"></div></td></tr>`).join("") + `</table>`;
+}
+
+function trendTable(tr) {
+  const max = Math.max(1, ...tr.map(t => t.median_views));
+  return `<table><tr><th class="l">สัปดาห์ (เริ่ม)</th><th>โพสต์</th><th>median วิว</th><th class="l"></th></tr>` +
+    tr.map(t => `<tr><td class="l">${t.week}</td><td>${t.posts}</td><td>${fmt(t.median_views)}</td>
+      <td class="l" style="width:40%"><div class="bar" style="width:${(t.median_views / max * 100).toFixed(0)}%"></div></td></tr>`).join("") + `</table>`;
+}
+
+function durTable(ds) {
+  if (!ds.length) return "";
+  return `<table><tr><th class="l">ความยาว</th><th>คลิป</th><th>median วิว</th><th>median ER%</th></tr>` +
+    ds.map(d => `<tr><td class="l">${d.range}</td><td>${d.n}</td><td>${fmt(d.median_views)}</td><td>${d.median_er.toFixed(1)}</td></tr>`).join("") + `</table>`;
+}
+
+function fullReport(r, title) {
+  return `${title || ""}${cards(r.summary)}
+    <h3>Outliers — คลิปที่ทำได้เกินมาตรฐานตัวเอง</h3>${videoTable(r.outliers.slice(0, 15))}
+    <h3>เวลาโพสต์ (median วิว ตามวัน × ช่วงเวลา)</h3>${heatmap(r.best_times)}
+    <h3>Hashtag ที่ได้ผล (lift = median วิวเมื่อใช้แท็ก ÷ median ทั้งหมด)</h3>${tagTable(r.hashtags)}
+    <h3>แนวโน้มรายสัปดาห์</h3>${trendTable(r.trend)}
+    <h3>ความยาวคลิป</h3>${durTable(r.durations)}
+    <h3>คลิปทั้งหมด (${r.videos.length})</h3>${videoTable(r.videos.slice(0, 100))}`;
+}
+
+// ---------- สถานะ + ช่องของฉัน ----------
+async function loadStatus() {
+  const s = await api("/api/status");
+  const msgs = [];
+  if (s.demo) msgs.push("โหมด DEMO — ข้อมูลทั้งหมดเป็นข้อมูลจำลอง ตั้ง TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET เพื่อใช้ข้อมูลจริง");
+  else if (!s.connected) msgs.push(`ยังไม่ได้เชื่อมบัญชี TikTok — <a href="/auth/login">เชื่อมบัญชี</a>`);
+  if (!s.research) msgs.push("Research API ปิดอยู่ — แท็บคู่แข่งและ Hashtag จะใช้ไม่ได้จนกว่าแอปจะได้รับอนุมัติและตั้ง TIKTOK_RESEARCH=1");
+  if (!s.ai) msgs.push("ยังไม่ได้ตั้ง ANTHROPIC_API_KEY — แท็บ AI จะใช้ไม่ได้");
+  if (msgs.length) { $("#banner").innerHTML = msgs.join("<br>"); $("#banner").hidden = false; }
+  return s;
+}
+
+async function loadMe() {
+  try {
+    const r = await api("/api/me");
+    $("#meBody").innerHTML = fullReport(r);
+  } catch (e) { $("#meBody").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
+// ---------- คู่แข่ง ----------
+async function renderCompList(names) {
+  names = names || await api("/api/competitors");
+  $("#compList").innerHTML = names.map(n => `<span><span class="link" data-u="${esc(n)}">@${esc(n)}</span>
+    <button class="x" data-del="${esc(n)}" title="ลบ">×</button></span>`).join("") || `<span class="hint">ยังไม่มีคู่แข่ง</span>`;
+  $("#compList").querySelectorAll("[data-u]").forEach(el => el.onclick = () => showCompetitor(el.dataset.u));
+  $("#compList").querySelectorAll("[data-del]").forEach(el => el.onclick = async () =>
+    renderCompList(await api("/api/competitors?username=" + encodeURIComponent(el.dataset.del), {method: "DELETE"})));
+}
+
+$("#compAdd").onclick = async () => {
+  try {
+    const names = await api("/api/competitors", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({username: $("#compInput").value})});
+    $("#compInput").value = ""; renderCompList(names);
+  } catch (e) { $("#compBody").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+};
+$("#compInput").onkeydown = e => { if (e.key === "Enter") $("#compAdd").click(); };
+
+async function showCompetitor(u) {
+  $("#compBody").innerHTML = "กำลังโหลด @" + esc(u) + "…";
+  try {
+    const r = await api(`/api/competitor/${encodeURIComponent(u)}?days=${$("#compDays").value}`);
+    $("#compBody").innerHTML = fullReport(r, `<h2>@${esc(u)}</h2>`);
+  } catch (e) { $("#compBody").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
+$("#compRun").onclick = async () => {
+  const btn = $("#compRun"); btn.disabled = true; $("#compBody").innerHTML = "กำลังดึงข้อมูลคู่แข่งทุกบัญชี…";
+  try {
+    const r = await api(`/api/outliers?days=${$("#compDays").value}&min_x=${$("#compMinX").value}`);
+    const errs = Object.entries(r.errors).map(([u, m]) => `@${esc(u)}: ${esc(m)}`).join("\n");
+    $("#compBody").innerHTML = (errs ? `<p class="err">${errs}</p>` : "") +
+      `<h3>Outliers จากคู่แข่งทั้งหมด (${r.outliers.length})</h3>${videoTable(r.outliers, true)}
+       <h3>Hashtag ที่พบบ่อยในคลิป outlier</h3>${tagTable(r.hashtags)}`;
+  } catch (e) { $("#compBody").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  btn.disabled = false;
+};
+
+// ---------- Hashtag ----------
+$("#tagRun").onclick = async () => {
+  const btn = $("#tagRun"); btn.disabled = true; $("#tagBody").innerHTML = "กำลังค้นหา…";
+  try {
+    const r = await api(`/api/hashtags?tags=${encodeURIComponent($("#tagInput").value)}&days=${$("#tagDays").value}`);
+    $("#tagBody").innerHTML = `<div class="cards">
+        <div class="card"><div class="k">คลิปที่พบ</div><div class="v">${r.n_videos}</div></div>
+        <div class="card"><div class="k">ครีเอเตอร์</div><div class="v">${r.n_creators}</div></div>
+        <div class="card"><div class="k">median วิว</div><div class="v">${fmt(r.median_views)}</div></div></div>
+      <h3>แท็กที่ใช้คู่กันบ่อย (เรียงตาม ความถี่ × lift)</h3>${tagTable(r.related)}
+      <h3>เวลาโพสต์ของคลิปในแท็กนี้</h3>${heatmap(r.best_times)}
+      <h3>คลิปวิวสูงสุดในแท็กนี้</h3>${videoTable(r.top_videos, true)}`;
+  } catch (e) { $("#tagBody").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  btn.disabled = false;
+};
+$("#tagInput").onkeydown = e => { if (e.key === "Enter") $("#tagRun").click(); };
+
+// ---------- AI ----------
+const list = xs => `<ol>${xs.map(x => `<li class="copy" title="คลิกเพื่อคัดลอก">${esc(x)}</li>`).join("")}</ol>`;
+$("#aiRun").onclick = async () => {
+  const btn = $("#aiRun"); btn.disabled = true; $("#aiBody").innerHTML = "Claude กำลังเขียน… (ราว 10-40 วินาที)";
+  try {
+    const r = await api("/api/ai", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({topic: $("#aiTopic").value, niche: $("#aiNiche").value, tone: $("#aiTone").value,
+                            length_sec: $("#aiLen").value, use_my_data: $("#aiUseData").checked})});
+    const s = r.script;
+    $("#aiBody").innerHTML = `<h3>Hook (3 วินาทีแรก)</h3>${list(r.hooks)}
+      <h3>Caption</h3>${list(r.captions)}
+      <h3>Hashtag</h3><p class="copy" title="คลิกเพื่อคัดลอก">${r.hashtags.map(t => "#" + esc(t.replace(/^#/, ""))).join(" ")}</p>
+      <h3>สคริปต์: ${esc(s.title)}</h3>
+      <table><tr><th class="l">เวลา</th><th class="l">ภาพ</th><th class="l">เสียงพูด</th></tr>
+        ${s.beats.map(b => `<tr><td class="l">${esc(b.time)}</td><td class="l">${esc(b.visual)}</td><td class="l">${esc(b.voiceover)}</td></tr>`).join("")}</table>
+      <p><b>CTA:</b> ${esc(s.cta)}</p>
+      <h3>ไอเดียคลิปต่อยอด</h3>${list(r.video_ideas)}
+      <h3>ทำไมถึงเลือกแนวนี้</h3><p>${esc(r.rationale)}</p>`;
+    $("#aiBody").querySelectorAll(".copy").forEach(el => el.onclick = () => navigator.clipboard?.writeText(el.textContent));
+  } catch (e) { $("#aiBody").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  btn.disabled = false;
+};
+
+loadStatus().then(loadMe).catch(e => { $("#meBody").innerHTML = `<p class="err">${esc(e.message)}</p>`; });
+renderCompList();
+</script>
+</body>
+</html>
