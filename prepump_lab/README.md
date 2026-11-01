@@ -95,11 +95,25 @@ Binance ไม่ได้ระบุในเอกสารว่า OI 5 น
 
 1. ค่าเริ่มต้นตั้ง lag ไว้ 5 นาที
 2. `forensic` รันซ้ำด้วย lag 0/5/10/15/30 นาที แล้วรายงานว่าผลเปลี่ยนไปแค่ไหน
-3. วัดค่าจริงด้วย `python run.py oi-latency --symbol ESPORTSUSDT --minutes 60` ซึ่งจะ poll ทั้ง API ย้อนหลังและ API real-time แล้วบันทึกว่า
+3. วัดค่าจริงด้วย `python run.py oi-latency --symbol ESPORTSUSDT --hours 48` ซึ่งจะ poll ทั้ง API ย้อนหลังและ API real-time แล้วบันทึกว่า
    - แถวใหม่ปรากฏช้ากว่า timestamp กี่นาที
    - ค่าในแถวตรงกับ OI real-time ณ ต้นช่วงหรือปลายช่วง 5 นาที
 
-   จากนั้นตั้ง `oi_lag_min` ให้ไม่น้อยกว่า latency สูงสุดที่วัดได้
+   รันอย่างน้อย 24–72 ชั่วโมง (ค่าเริ่มต้น `--hours 48`) ระบบบันทึกลง CSV ทันทีที่เจอแถวใหม่ กด Ctrl+C แล้วรันต่อได้
+   สรุปผลด้วย `python run.py oi-latency-summary --symbol ESPORTSUSDT` ระบบจะแนะนำ `oi_lag_min` = p99 + ความละเอียดการ poll + 1 นาที
+
+### data_quality_report.json
+
+`fetch` / `forensic` / `backtest` เขียนรายงานคุณภาพข้อมูลทุกครั้ง แต่ละเหรียญมี coverage, ช่วงที่ขาด (gap), สัดส่วนแท่ง volume=0 และสถานะ `ready` / `partial` / `not_ready`
+- backtest ตัดเหรียญ `not_ready` ออกอัตโนมัติ
+- ข้อมูลที่ขาด (แท่ง 1m หาย, OI หายเกิน 15 นาที) เป็น **NaN ไม่ใช่ 0 หรือค่าเก่า** — ไม่อย่างนั้นข้อมูลขาดจะดูเหมือน "ตลาดเงียบ / OI นิ่ง" แล้วถูกโทษว่าตลาดไม่มีแรง
+- ตาราง "ทำไมไม่มีสัญญาณ" จัดลำดับสาเหตุ: ข้อมูลขาด (coverage < 80%) > เกณฑ์เข้มเกิน > ตลาดไม่มีแรง
+
+### กัน ESPORTS รั่วเข้า Out-of-Sample
+
+- `backtest` ตัดทุกเหรียญที่มี `reports/<SYM>_forensic.json` ออกอัตโนมัติ (ต้องสั่ง `--include-forensic` ถึงจะใส่กลับ)
+- forensic บันทึก hash ของ `config.py` ถ้า config เปลี่ยนหลังทำ forensic backtest จะเตือนว่าเกณฑ์อาจถูกปรับจากผลเหรียญนั้น
+- CI ใช้สองวิธี (cluster bootstrap รายวัน + moving-block bootstrap ตามเวลา) แล้วตัดสินด้วยขอบล่างที่ต่ำกว่า
 
 ---
 

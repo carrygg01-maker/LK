@@ -73,6 +73,41 @@ def test_null_has_no_alpha():
     assert s.get("n", 0) == 0 or s["mean_net_pct"] < 0.5, s
 
 
+
+
+def test_quality_detects_gaps_and_missing_oi():
+    import quality
+    raw, _ = synthetic.make(days=4, seed=2)
+    fk = raw["fut_kl"]
+    raw["fut_kl"] = fk.drop(fk.index[2000:2300])           # ขาด 300 นาที
+    raw["metrics"] = raw["metrics"].iloc[: len(raw["metrics"]) // 2]   # OI หายครึ่งหลัง
+    q = quality.symbol_quality("X", raw)
+    assert q["status"] != "ready", q
+    assert any(g["missing_min"] >= 299 for g in q["datasets"]["fut_kl"]["gaps"]), q["datasets"]["fut_kl"]["gaps"]
+    assert q["datasets"]["metrics"]["coverage"] < 0.6
+
+
+def test_no_signal_blamed_on_data_when_oi_missing():
+    raw, truth = synthetic.make(days=14, seed=1)
+    day = truth["real"][0]["pump_start"][:10]
+    t = pd.Timestamp(truth["real"][0]["pump_start"])
+    m = raw["metrics"]
+    raw["metrics"] = m[(m.index < t - pd.Timedelta(hours=14)) | (m.index > t + pd.Timedelta(hours=2))]
+    a = forensic.run(raw, DEFAULT, day, day, symbol="X")["answers"]
+    assert a["Q1_first_signal"] is None
+    oi = [r for r in a["near_miss"] if r["metric"].startswith("OI")][0]
+    assert oi["cause"] == "data", oi
+
+
+def test_metrics_math():
+    import sim
+    tr = pd.DataFrame({"net_pct": [10.0, -5.0, -5.0, 20.0]})
+    s = sim.summarize(tr)
+    assert abs(s["expectancy_pct"] - 5.0) < 1e-9
+    assert abs(s["profit_factor"] - 3.0) < 1e-9      # (10+20)/(5+5)
+    assert abs(s["breakeven_win_rate"] - 5 / (15 + 5)) < 1e-9
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -148,16 +148,26 @@ def near_miss(b: pd.DataFrame, ep: labels.Episode, cfg: Cfg) -> list[dict]:
     s = cfg.signal
     w = b.loc[ep.breakout_time - pd.Timedelta(minutes=cfg.label.lead_window): ep.breakout_time]
     out = []
+    MIN_COV = 0.8
     for name, col, th, scale in [("OI Δ60m", "oi_chg", s.oi_min_chg, 100), ("Futures CVD z", "fut_cvd_z", s.cvd_z, 1),
                                  ("Spot CVD z", "spot_cvd_z", s.cvd_z, 1), ("Relative Volume", "rvol", s.rv_min, 1)]:
         x = w[col]
+        cov = float(x.notna().mean()) if len(x) else 0.0
         if x.notna().sum() == 0:
-            out.append({"metric": name, "max": None, "threshold": th * scale, "status": "ไม่มีข้อมูล"})
+            out.append({"metric": name, "max": None, "threshold": th * scale, "coverage": 0.0,
+                        "status": "ข้อมูลขาด", "cause": "data"})
             continue
         mx = float(x.max())
-        st = "ถึงเกณฑ์" if mx >= th else ("เฉียด (≥70% ของเกณฑ์)" if mx >= 0.7 * th else "ห่างเกณฑ์")
+        if mx >= th:
+            st, cause = "ถึงเกณฑ์", "ok"
+        elif cov < MIN_COV:
+            st, cause = f"ข้อมูลขาด (มี {cov:.0%}) — สรุปไม่ได้", "data"
+        elif mx >= 0.7 * th:
+            st, cause = "เฉียดเกณฑ์ (≥70%)", "threshold"
+        else:
+            st, cause = "ห่างเกณฑ์ — ไม่มีแรงแบบที่สูตรมองหา", "market"
         out.append({"metric": name, "max": round(mx * scale, 2), "threshold": th * scale,
-                    "at": str(x.idxmax()), "status": st})
+                    "coverage": round(cov, 3), "at": str(x.idxmax()), "status": st, "cause": cause})
     return out
 
 
@@ -200,6 +210,14 @@ def to_markdown(ans: dict, cfg: Cfg) -> str:
     L.append(f"ข้อมูล: {a['data_start']} → {a['data_end']} (UTC) · warm-up baseline ถึง {a['warmup_end']}\n")
     cov = a["data_coverage"]
     L.append("ข้อมูลที่มีจริง: " + ", ".join(f"{k}={'✅' if v else '❌'}" for k, v in cov.items()) + "\n")
+    dq = a.get("data_quality")
+    if dq:
+        L.append(f"คุณภาพข้อมูล: **{dq['status']}** {'· ' + '; '.join(dq['reasons']) if dq['reasons'] else ''} "
+                 f"{'· ' + '; '.join(dq['warnings']) if dq['warnings'] else ''} (รายละเอียด: reports/data_quality_report.json)\n")
+    fc = a.get("feature_coverage_pre_breakout")
+    if fc:
+        L.append("ข้อมูลที่ใช้คำนวณได้ใน 12 ชม.ก่อน breakout: " + " · ".join(f"{k} {v:.0%}" for k, v in fc.items())
+                 + (" ⚠️ ต่ำกว่า 80% — ผลช่วงนี้เชื่อถือได้น้อย" if min(fc.values()) < 0.8 else "") + "\n")
     me = a.get("main_episode")
     if not me:
         L.append("\n**ไม่พบการพุ่งที่เข้านิยามในช่วงที่โฟกัส** "
@@ -228,9 +246,15 @@ def to_markdown(ans: dict, cfg: Cfg) -> str:
     L.append("")
     if not a.get("Q1_first_signal") and a.get("near_miss"):
         L.append("## ทำไมไม่มีสัญญาณ (12 ชม.ก่อน breakout)\n")
-        L.append("| เงื่อนไข | ค่าสูงสุด | เกณฑ์ | สถานะ |\n|---|---|---|---|")
+        L.append("| เงื่อนไข | ค่าสูงสุด | เกณฑ์ | ข้อมูลมี | สถานะ |\n|---|---|---|---|---|")
         for r in a["near_miss"]:
-            L.append(f"| {r['metric']} | {r['max'] if r['max'] is not None else '-'} | {r['threshold']} | {r['status']} |")
+            L.append(f"| {r['metric']} | {r['max'] if r['max'] is not None else '-'} | {r['threshold']} | "
+                     f"{r['coverage']:.0%} | {r['status']} |")
+        causes = {r["cause"] for r in a["near_miss"] if r["cause"] != "ok"}
+        diag = ("**ข้อมูลไม่พอ — ยังสรุปไม่ได้ว่าสูตรล้มเหลว**" if "data" in causes else
+                "**เกณฑ์อาจเข้มเกิน**" if "threshold" in causes else
+                "**ตลาดไม่ได้ส่งสัญญาณแบบที่สูตรมองหา**" if "market" in causes else "ทุกเงื่อนไขถึงเกณฑ์แต่ไม่พร้อมกัน")
+        L.append(f"\nสรุปสาเหตุ: {diag} (ลำดับความสำคัญ: ข้อมูลขาด > เกณฑ์ > ตลาด)")
         L.append("\n> ไม่มีข้อมูล = ปัญหาข้อมูล · เฉียด = เกณฑ์อาจเข้มไป (แต่ห้ามลดเกณฑ์จากเหรียญนี้เหรียญเดียว) · ห่างเกณฑ์ = ตลาดไม่ได้ส่งสัญญาณแบบที่สูตรมองหา\n")
     if a.get("lag_sensitivity"):
         L.append("## ความไวต่อสมมติฐานเวลาเผยแพร่ OI\n")

@@ -92,6 +92,23 @@ def cluster_bootstrap(trades: pd.DataFrame, n_boot: int = 2000, seed: int = 3) -
     return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
 
 
+def block_bootstrap(trades: pd.DataFrame, n_boot: int = 2000, seed: int = 4) -> tuple[float, float]:
+    """moving-block bootstrap บนเทรดเรียงตามเวลา (block ≈ n^(1/3)) — เก็บ autocorrelation ระหว่างไม้ติดกัน"""
+    x = trades.sort_values("entry_time")["net_pct"].to_numpy()
+    n = len(x)
+    if n < 20:
+        return (np.nan, np.nan)
+    blk = max(2, int(round(n ** (1 / 3))))
+    starts = np.arange(n - blk + 1)
+    k = int(np.ceil(n / blk))
+    rng = np.random.default_rng(seed)
+    means = np.empty(n_boot)
+    for i in range(n_boot):
+        st = rng.choice(starts, k)
+        means[i] = np.concatenate([x[s:s + blk] for s in st])[:n].mean()
+    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+
 def random_trades(prep: dict, test_trades: pd.DataFrame, cfg: Cfg, seed: int) -> pd.DataFrame:
     """สุ่มเวลาเข้า จำนวนเท่ากับเทรดจริงในแต่ละ (เหรียญ, เดือน)"""
     rng = np.random.default_rng(seed)
@@ -154,7 +171,11 @@ def evaluate(prep: dict, oos: pd.DataFrame, cfg: Cfg) -> dict:
     if not len(oos):
         return {"verdict": "ไม่มีเทรด OOS — ข้อมูลไม่พอ", "pass": False}
     s = sim.summarize(oos.sort_values("entry_time"))
-    lo, hi = cluster_bootstrap(oos)
+    c_lo, c_hi = cluster_bootstrap(oos)
+    b_lo, b_hi = block_bootstrap(oos)
+    # ใช้ขอบล่างที่ระวังที่สุดในสองวิธี
+    lo = np.nanmin([c_lo, b_lo]) if np.isfinite([c_lo, b_lo]).any() else np.nan
+    hi = np.nanmax([c_hi, b_hi]) if np.isfinite([c_hi, b_hi]).any() else np.nan
     rnd = random_trades(prep, oos, cfg, seed=5)
     rs = sim.summarize(rnd) if len(rnd) else {"n": 0}
     kinds = oos["kind"].value_counts(normalize=True).to_dict()
@@ -186,7 +207,8 @@ def evaluate(prep: dict, oos: pd.DataFrame, cfg: Cfg) -> dict:
         "ตัด 5% ไม้ที่ดีที่สุดออกแล้วยังบวก": trimmed > 0,
     }
     ok = all(checks.values())
-    return {"summary": s, "ci95_mean_net_pct": [lo, hi], "random": rs,
+    return {"summary": s, "ci95_mean_net_pct": [lo, hi],
+            "ci95_cluster_day": [c_lo, c_hi], "ci95_block": [b_lo, b_hi], "random": rs,
             "precision": precision, "late_share": kinds.get("late", 0.0),
             "false_share": kinds.get("false", 0.0),
             "recall": hit / n_eps if n_eps else None, "n_pumps_oos": n_eps,
@@ -225,6 +247,8 @@ def to_markdown(res: dict, ev: dict, fa: list[dict], cfg: Cfg, n_symbols: int) -
         L.append(f"- กำไรเฉลี่ยต่อไม้ชนะ {s['avg_win_pct']:+.2f}% · ขาดทุนเฉลี่ยต่อไม้แพ้ {s['avg_loss_pct']:+.2f}% · "
                  f"payoff {s['payoff_ratio']:.2f} · win rate คุ้มทุน {be*100:.0f}%" if be is not None else "- payoff: -")
         L.append(f"- เดือนทดสอบที่กำไร {ev['positive_fold_share']*100:.0f}% · Expectancy เมื่อตัด 5% ไม้ดีสุด {ev['mean_net_pct_trim_top5']:+.3f}%")
+        L.append(f"- CI95 แยกวิธี: cluster รายวัน {ev['ci95_cluster_day'][0]:+.3f} … {ev['ci95_cluster_day'][1]:+.3f} · "
+                 f"moving-block {ev['ci95_block'][0]:+.3f} … {ev['ci95_block'][1]:+.3f} (ตัดสินด้วยขอบล่างที่ต่ำกว่า)")
         r = ev["random"]
         if r.get("n"):
             L.append(f"- สุ่มเข้าเทรดจำนวนเท่ากัน: เฉลี่ยสุทธิ {r['mean_net_pct']:+.3f}%")

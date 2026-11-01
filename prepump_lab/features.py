@@ -58,18 +58,17 @@ def build(raw: dict[str, pd.DataFrame], cfg: Cfg) -> pd.DataFrame:
     b["open"] = fk["open"].fillna(b["close"].shift(1)).fillna(b["close"])
     b["high"] = fk["high"].fillna(b["close"])
     b["low"] = fk["low"].fillna(b["close"])
-    b["qv"] = fk["quote_volume"].fillna(0.0)
-    b["fut_delta"] = (2 * fk["taker_buy_quote"] - fk["quote_volume"]).fillna(0.0)
+    # Binance ออกแท่งทุกนาทีแม้ volume=0 -> แถวที่หาย = ข้อมูลขาด ให้เป็น NaN (ไม่ใช่ 0 ที่ดูเหมือนตลาดเงียบ)
+    b["kl_missing"] = fk["close"].isna()
+    b["qv"] = fk["quote_volume"]
+    b["fut_delta"] = 2 * fk["taker_buy_quote"] - fk["quote_volume"]
 
     sk = raw.get("spot_kl")
     if sk is not None and len(sk):
         sk = sk.reindex(idx)
         b["spot_close"] = sk["close"].ffill()
-        b["spot_qv"] = sk["quote_volume"].fillna(0.0)
-        b["spot_delta"] = (2 * sk["taker_buy_quote"] - sk["quote_volume"]).fillna(0.0)
-        # klines ที่ยังไม่เผยแพร่ (หลังจุดสุดท้ายของ spot) ต้องเป็น NaN ไม่ใช่ 0
-        last = raw["spot_kl"].index[-1]
-        b.loc[b.index > last, ["spot_qv", "spot_delta"]] = np.nan
+        b["spot_qv"] = sk["quote_volume"]
+        b["spot_delta"] = 2 * sk["taker_buy_quote"] - sk["quote_volume"]
     else:
         b["spot_close"] = np.nan
         b["spot_qv"] = np.nan
@@ -82,8 +81,9 @@ def build(raw: dict[str, pd.DataFrame], cfg: Cfg) -> pd.DataFrame:
         avail = publish_time("metrics", m.index, cfg)
         mm = pd.DataFrame({"avail": avail, "oi": m["sum_open_interest"].values,
                            "oi_usd": m["sum_open_interest_value"].values}).sort_values("avail")
+        # tolerance: ถ้า OI ล่าสุดเก่ากว่า 15 นาที (ข้อมูลขาด) ให้เป็น NaN — ห้ามเติมค่าเก่าจนดูเหมือน "OI นิ่ง"
         j = pd.merge_asof(pd.DataFrame({"decide": decide}), mm, left_on="decide",
-                          right_on="avail", direction="backward")
+                          right_on="avail", direction="backward", tolerance=pd.Timedelta(minutes=15))
         b["oi"] = j["oi"].values
         b["oi_usd"] = j["oi_usd"].values
     else:
@@ -94,7 +94,7 @@ def build(raw: dict[str, pd.DataFrame], cfg: Cfg) -> pd.DataFrame:
     if f is not None and len(f):
         ff = pd.DataFrame({"avail": f.index, "funding": f["funding"].values}).sort_values("avail")
         j = pd.merge_asof(pd.DataFrame({"decide": decide}), ff, left_on="decide",
-                          right_on="avail", direction="backward")
+                          right_on="avail", direction="backward", tolerance=pd.Timedelta(hours=9))
         b["funding"] = j["funding"].values
     else:
         b["funding"] = np.nan
@@ -132,6 +132,6 @@ def add_features(b: pd.DataFrame, cfg: Cfg) -> pd.DataFrame:
     b["rvol"] = rv / base.replace(0, np.nan)
 
     # CVD สะสมแบบต่อเนื่องสำหรับกราฟ (ไม่ใช้ในสัญญาณ)
-    b["fut_cvd_cum"] = b["fut_delta"].cumsum()
+    b["fut_cvd_cum"] = b["fut_delta"].fillna(0).cumsum()
     b["spot_cvd_cum"] = b["spot_delta"].fillna(0).cumsum()
     return b
