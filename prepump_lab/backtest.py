@@ -25,7 +25,10 @@ from config import Cfg, WF_GRID
 
 # เกณฑ์ผ่าน — ตั้งก่อนเห็นผล ห้ามขยับทีหลัง
 PASS_MIN_TRADES = 100
-PASS_MIN_PRECISION = 0.20      # alert ที่นำหน้าการพุ่งจริงอย่างน้อย 20%
+PASS_MIN_PRECISION = 0.20      # alert ที่นำหน้าการพุ่งจริงอย่างน้อย 20% (ไม่พอลำพัง — ต้องผ่านข้ออื่นด้วย)
+PASS_MIN_PF = 1.3              # Profit Factor หลังต้นทุน
+PASS_MIN_POS_FOLDS = 0.6       # อย่างน้อย 60% ของเดือนทดสอบต้องกำไร (กันผลมาจากเดือนเดียว)
+
 MIN_TRAIN_TRADES = 30
 
 
@@ -155,6 +158,10 @@ def evaluate(prep: dict, oos: pd.DataFrame, cfg: Cfg) -> dict:
     rnd = random_trades(prep, oos, cfg, seed=5)
     rs = sim.summarize(rnd) if len(rnd) else {"n": 0}
     kinds = oos["kind"].value_counts(normalize=True).to_dict()
+    fold_mean = oos.groupby("fold")["net_pct"].mean()
+    pos_folds = float((fold_mean > 0).mean()) if len(fold_mean) else 0.0
+    xs = np.sort(oos["net_pct"].values)
+    trimmed = float(xs[: max(1, int(len(xs) * 0.95))].mean())
     precision = kinds.get("lead", 0.0)
     # recall: การพุ่งใน OOS ที่มี alert นำหน้า (นับจากเทรด — alert ที่ถูกข้ามเพราะถือไม้อยู่ไม่นับ)
     test_months = set(oos["fold"])
@@ -174,6 +181,9 @@ def evaluate(prep: dict, oos: pd.DataFrame, cfg: Cfg) -> dict:
         "ขอบล่าง CI 95% ของกำไรเฉลี่ย > 0": bool(np.isfinite(lo) and lo > 0),
         "ชนะการสุ่มเข้าเทรด": bool(rs.get("n") and s["mean_net_pct"] > rs["mean_net_pct"]),
         f"Precision ≥ {PASS_MIN_PRECISION:.0%}": precision >= PASS_MIN_PRECISION,
+        f"Profit Factor ≥ {PASS_MIN_PF}": s["profit_factor"] >= PASS_MIN_PF,
+        f"เดือนทดสอบที่กำไร ≥ {PASS_MIN_POS_FOLDS:.0%}": pos_folds >= PASS_MIN_POS_FOLDS,
+        "ตัด 5% ไม้ที่ดีที่สุดออกแล้วยังบวก": trimmed > 0,
     }
     ok = all(checks.values())
     return {"summary": s, "ci95_mean_net_pct": [lo, hi], "random": rs,
@@ -181,6 +191,7 @@ def evaluate(prep: dict, oos: pd.DataFrame, cfg: Cfg) -> dict:
             "false_share": kinds.get("false", 0.0),
             "recall": hit / n_eps if n_eps else None, "n_pumps_oos": n_eps,
             "median_lead_min": float(lead.median()) if len(lead) else None,
+            "positive_fold_share": pos_folds, "mean_net_pct_trim_top5": trimmed,
             "checks": checks, "pass": ok,
             "verdict": "ผ่าน" if ok else "ไม่ผ่าน"}
 
@@ -208,8 +219,12 @@ def to_markdown(res: dict, ev: dict, fa: list[dict], cfg: Cfg, n_symbols: int) -
             L.append(f"| {k} | {'✅' if v else '❌'} |")
         s = ev["summary"]
         lo, hi = ev["ci95_mean_net_pct"]
-        L.append(f"\n- เทรด OOS {s['n']} ไม้ · win {s['win_rate']*100:.0f}% · เฉลี่ยสุทธิ **{s['mean_net_pct']:+.3f}%** "
-                 f"(CI95 {lo:+.3f} … {hi:+.3f}) · Max DD {s['max_dd_pct']:.1f}%")
+        L.append(f"\n- เทรด OOS {s['n']} ไม้ · win {s['win_rate']*100:.0f}% · Expectancy **{s['expectancy_pct']:+.3f}%/ไม้** "
+                 f"(CI95 {lo:+.3f} … {hi:+.3f}) · Profit Factor {s['profit_factor']:.2f} · Max DD {s['max_dd_pct']:.1f}%")
+        be = s.get("breakeven_win_rate")
+        L.append(f"- กำไรเฉลี่ยต่อไม้ชนะ {s['avg_win_pct']:+.2f}% · ขาดทุนเฉลี่ยต่อไม้แพ้ {s['avg_loss_pct']:+.2f}% · "
+                 f"payoff {s['payoff_ratio']:.2f} · win rate คุ้มทุน {be*100:.0f}%" if be is not None else "- payoff: -")
+        L.append(f"- เดือนทดสอบที่กำไร {ev['positive_fold_share']*100:.0f}% · Expectancy เมื่อตัด 5% ไม้ดีสุด {ev['mean_net_pct_trim_top5']:+.3f}%")
         r = ev["random"]
         if r.get("n"):
             L.append(f"- สุ่มเข้าเทรดจำนวนเท่ากัน: เฉลี่ยสุทธิ {r['mean_net_pct']:+.3f}%")

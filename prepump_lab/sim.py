@@ -67,7 +67,17 @@ def summarize(trades: pd.DataFrame) -> dict:
     x = trades["net_pct"].values / 100
     eq = np.cumprod(1 + x)
     dd = (eq / np.maximum.accumulate(eq) - 1).min()
+    wins, losses = x[x > 0], x[x <= 0]
+    gross_win, gross_loss = wins.sum(), -losses.sum()
+    pf = float(gross_win / gross_loss) if gross_loss > 0 else float("inf")
+    avg_w = float(wins.mean() * 100) if len(wins) else 0.0
+    avg_l = float(losses.mean() * 100) if len(losses) else 0.0
     return {"n": int(len(x)), "win_rate": float((x > 0).mean()),
-            "mean_net_pct": float(x.mean() * 100), "median_net_pct": float(np.median(x) * 100),
+            "mean_net_pct": float(x.mean() * 100),           # = expectancy ต่อไม้ หลังต้นทุน
+            "expectancy_pct": float(x.mean() * 100),
+            "profit_factor": pf, "avg_win_pct": avg_w, "avg_loss_pct": avg_l,
+            "payoff_ratio": float(avg_w / -avg_l) if avg_l < 0 else float("inf"),
+            "breakeven_win_rate": float(-avg_l / (avg_w - avg_l)) if avg_w > 0 and avg_l < 0 else None,
+            "median_net_pct": float(np.median(x) * 100),
             "total_compound_pct": float((eq[-1] - 1) * 100), "max_dd_pct": float(dd * 100),
             "best_pct": float(x.max() * 100), "worst_pct": float(x.min() * 100)}

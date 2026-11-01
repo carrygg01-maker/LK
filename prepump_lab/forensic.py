@@ -115,12 +115,65 @@ def run(raw: dict[str, pd.DataFrame], cfg: Cfg, focus_start: str | None = None,
         ans["late_alerts"] = int(len(late))
         if first is not None:
             ans["evidence_at_first_signal"] = evidence(b, comp, first)
+            ans["price_at_signal"] = float(b.loc[first, "close"])
+            ans["signal_drivers"] = drivers(comp, first)
+        ans["near_miss"] = near_miss(b, main, cfg)
     ans["all_trades_summary"] = sim.summarize(trades)
     rb = random_baseline(b, len(trades), cfg)
     ans["random_baseline"] = {k: v for k, v in rb.items() if not k.startswith("_")}
     ans["classification_counts"] = cls["kind"].value_counts().to_dict() if len(cls) else {}
     return {"answers": ans, "bars": b, "components": comp, "alerts": al, "classes": cls,
             "episodes": eps, "trades": trades}
+
+
+def drivers(comp: pd.DataFrame, t: pd.Timestamp) -> dict:
+    """เงื่อนไขไหนผ่าน ณ alert และตัวไหน 'ติดเป็นตัวสุดท้าย' (= ตัวจุดชนวน alert)"""
+    passed = [signals.LABELS_TH[c] for c in signals.COMPONENTS if comp.at[t, c]]
+    onset = {}
+    for c in ["oi_expansion", "fut_cvd", "spot_cvd", "rel_volume"]:
+        s = comp[c].loc[:t]
+        if not s.iloc[-1]:
+            continue
+        off = s.index[~s.values]
+        onset[signals.LABELS_TH[c]] = str(off[-1] + pd.Timedelta(minutes=1)) if len(off) else str(s.index[0])
+    trigger = max(onset, key=lambda k: onset[k]) if onset else None
+    return {"passed": passed, "onset": onset, "trigger": trigger}
+
+
+def near_miss(b: pd.DataFrame, ep: labels.Episode, cfg: Cfg) -> list[dict]:
+    """
+    ถ้าไม่มี alert: ใน 12 ชม.ก่อน breakout แต่ละเงื่อนไขเข้าใกล้เกณฑ์แค่ไหน
+    ใช้แยกว่าล้มเหลวเพราะ 'ข้อมูลไม่มี' / 'เกณฑ์เข้มไป' / 'ตลาดไม่ได้ส่งสัญญาณแบบนี้'
+    """
+    s = cfg.signal
+    w = b.loc[ep.breakout_time - pd.Timedelta(minutes=cfg.label.lead_window): ep.breakout_time]
+    out = []
+    for name, col, th, scale in [("OI Δ60m", "oi_chg", s.oi_min_chg, 100), ("Futures CVD z", "fut_cvd_z", s.cvd_z, 1),
+                                 ("Spot CVD z", "spot_cvd_z", s.cvd_z, 1), ("Relative Volume", "rvol", s.rv_min, 1)]:
+        x = w[col]
+        if x.notna().sum() == 0:
+            out.append({"metric": name, "max": None, "threshold": th * scale, "status": "ไม่มีข้อมูล"})
+            continue
+        mx = float(x.max())
+        st = "ถึงเกณฑ์" if mx >= th else ("เฉียด (≥70% ของเกณฑ์)" if mx >= 0.7 * th else "ห่างเกณฑ์")
+        out.append({"metric": name, "max": round(mx * scale, 2), "threshold": th * scale,
+                    "at": str(x.idxmax()), "status": st})
+    return out
+
+
+def lag_sensitivity(raw: dict, cfg: Cfg, focus_start, focus_end, lags=(0, 5, 10, 15, 30)) -> list[dict]:
+    """ผลขึ้นกับสมมติฐานเวลาเผยแพร่ OI แค่ไหน — ถ้า lag 0 ดีกว่า 15 มาก = ผลพึ่งการเห็น OI เร็ว"""
+    from dataclasses import replace
+    rows = []
+    for lag in lags:
+        c = replace(cfg, data=replace(cfg.data, oi_lag_min=lag))
+        a = run(raw, c, focus_start, focus_end)["answers"]
+        t = a.get("Q4_trade_on_first_signal") or {}
+        s = a["all_trades_summary"]
+        rows.append({"oi_lag_min": lag, "first_signal": a.get("Q1_first_signal"), "lead_min": a.get("Q2_lead_min"),
+                     "false_before": a.get("Q3_false_before"), "first_trade_net_pct": t.get("net_pct"),
+                     "all_n": s.get("n", 0), "all_expectancy_pct": s.get("expectancy_pct")})
+    return rows
 
 
 def evidence(b: pd.DataFrame, comp: pd.DataFrame, t: pd.Timestamp) -> list[dict]:
@@ -154,6 +207,39 @@ def to_markdown(ans: dict, cfg: Cfg) -> str:
         return "\n".join(L)
     L.append(f"\n## เหตุการณ์หลัก\n\nlow {me['low']:.6g} @ {me['low_time']} → breakout (+{cfg.label.breakout_gain*100:.0f}%) "
              f"@ **{me['breakout_time']}** → peak {me['peak']:.6g} @ {me['peak_time']} (**+{me['gain_pct']}%**)\n")
+    t4 = a.get("Q4_trade_on_first_signal")
+    dr = a.get("signal_drivers") or {}
+    oos = a.get("oos_summary")
+    L.append("## Metrics สรุป\n")
+    L.append("| Metric | ผล |\n|---|---|")
+    L.append(f"| First Signal Time | {a.get('Q1_first_signal') or 'ไม่มี'} |")
+    L.append(f"| Price at Signal | close แท่งสัญญาณ {a['price_at_signal']:.6g} · ราคาเข้าได้จริง (open แท่งถัดไป + slippage) {t4['entry']:.6g} |"
+             if a.get("price_at_signal") is not None and t4 else "| Price at Signal | - |")
+    L.append(f"| Breakout Time | {me['breakout_time']} |")
+    q2m = a.get("Q2_lead_min")
+    L.append(f"| Lead Time | {f'{q2m:.0f} นาที' if q2m is not None else '-'} |")
+    L.append(f"| Signal Drivers | ผ่าน: {', '.join(dr.get('passed', [])) or '-'} · ตัวจุดชนวน: {dr.get('trigger') or '-'} |")
+    L.append(f"| False Signals ก่อนพุ่ง | {a.get('Q3_false_before')} ครั้ง ใน {a.get('Q3_days_observed')} วัน |")
+    L.append(f"| Net Return (สัญญาณแรก) | {t4['net_pct']:+.2f}% ({t4['reason']}) |" if t4 else "| Net Return (สัญญาณแรก) | - |")
+    if oos:
+        L.append(f"| Out-of-Sample | {oos} |")
+    else:
+        L.append("| Out-of-Sample | ยังไม่รัน — `python run.py backtest --exclude " + a["symbol"] + "` |")
+    L.append("")
+    if not a.get("Q1_first_signal") and a.get("near_miss"):
+        L.append("## ทำไมไม่มีสัญญาณ (12 ชม.ก่อน breakout)\n")
+        L.append("| เงื่อนไข | ค่าสูงสุด | เกณฑ์ | สถานะ |\n|---|---|---|---|")
+        for r in a["near_miss"]:
+            L.append(f"| {r['metric']} | {r['max'] if r['max'] is not None else '-'} | {r['threshold']} | {r['status']} |")
+        L.append("\n> ไม่มีข้อมูล = ปัญหาข้อมูล · เฉียด = เกณฑ์อาจเข้มไป (แต่ห้ามลดเกณฑ์จากเหรียญนี้เหรียญเดียว) · ห่างเกณฑ์ = ตลาดไม่ได้ส่งสัญญาณแบบที่สูตรมองหา\n")
+    if a.get("lag_sensitivity"):
+        L.append("## ความไวต่อสมมติฐานเวลาเผยแพร่ OI\n")
+        L.append("| OI lag (นาที) | สัญญาณแรก | lead (นาที) | false ก่อน | สุทธิไม้แรก % | ทุก alert n | expectancy % |\n|---|---|---|---|---|---|---|")
+        for r in a["lag_sensitivity"]:
+            f = lambda v, d=2: "-" if v is None or (isinstance(v, float) and np.isnan(v)) else (f"{v:.{d}f}" if isinstance(v, float) else str(v))  # noqa: E731
+            L.append(f"| {r['oi_lag_min']} | {r['first_signal'] or '-'} | {f(r['lead_min'], 0)} | {r['false_before']} | "
+                     f"{f(r['first_trade_net_pct'])} | {r['all_n']} | {f(r['all_expectancy_pct'])} |")
+        L.append("\n> ถ้าผลดีเฉพาะ lag 0–5 แต่หายที่ 10–15 = สัญญาณพึ่งการเห็น OI เร็วกว่าที่อาจทำได้จริง ต้องวัด latency จริงด้วย `python run.py oi-latency`\n")
     L.append("## คำตอบ 4 ข้อ\n")
     L.append("| คำถาม | คำตอบ |\n|---|---|")
     L.append(f"| Q1 สัญญาณแรกเกิดเมื่อไร | {a.get('Q1_first_signal') or '**ไม่มีสัญญาณก่อน breakout**'} |")
@@ -184,8 +270,8 @@ def to_markdown(ans: dict, cfg: Cfg) -> str:
     L.append("## ทุก alert ในช่วงข้อมูล (ไม่ใช่แค่ครั้งที่ถูก)\n")
     L.append(f"การจัดประเภท alert: {a.get('classification_counts')}\n")
     if s.get("n"):
-        L.append(f"เทรด {s['n']} ไม้ · win {s['win_rate']*100:.0f}% · เฉลี่ยสุทธิ {s['mean_net_pct']:+.2f}%/ไม้ · "
-                 f"ทบต้น {s['total_compound_pct']:+.1f}% · Max DD {s['max_dd_pct']:.1f}%\n")
+        L.append(f"เทรด {s['n']} ไม้ · win {s['win_rate']*100:.0f}% · Expectancy {s['expectancy_pct']:+.2f}%/ไม้ · "
+                 f"Profit Factor {s['profit_factor']:.2f} · ทบต้น {s['total_compound_pct']:+.1f}% · Max DD {s['max_dd_pct']:.1f}%\n")
     if rb:
         L.append(f"Baseline สุ่มเข้า {s.get('n')} ไม้ × {rb['sims']} รอบ: เฉลี่ยสุทธิ median {rb['mean_net_pct_p50']:+.2f}% "
                  f"(5–95%: {rb['p05']:+.2f}% … {rb['p95']:+.2f}%)\n")

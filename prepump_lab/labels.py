@@ -54,8 +54,9 @@ def episodes(b: pd.DataFrame, cfg: Cfg) -> list[Episode]:
         t0 = q[i]
         end = min(t0 + W, len(hi) - 1)
         p = t0 + int(np.argmax(hi[t0:end + 1]))
+        cap = min(t0 + 2 * W, len(hi) - 1)   # peak ห่างจากจุดเริ่มได้ไม่เกิน 2W (ไม่รวบหลายรอบพุ่งเป็นรอบเดียว)
         while True:  # ขยาย peak ถ้ายังทำ high ใหม่ภายใน W นาทีถัดไป
-            e2 = min(p + W, len(hi) - 1)
+            e2 = min(p + W, cap)
             p2 = p + int(np.argmax(hi[p:e2 + 1]))
             if p2 == p:
                 break

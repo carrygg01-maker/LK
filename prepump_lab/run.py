@@ -6,6 +6,7 @@ run.py — Pre-Pump Forensic Lab
   python run.py forensic --symbol ESPORTSUSDT --focus-start 2026-10-25 --focus-end 2026-11-02
   python run.py universe --start 2026-03-01 --end 2026-10-31 --max 120     # Phase 2: ดึงหลายเหรียญ
   python run.py backtest [--symbols A,B,...]                                 # Phase 3: walk-forward
+  python run.py oi-latency --symbol ESPORTSUSDT --minutes 60                  # วัดเวลาเผยแพร่ OI จริง
 
 ผลลัพธ์อยู่ใน reports/
 """
@@ -31,8 +32,22 @@ from config import DEFAULT  # noqa: E402
 REPORTS = HERE / "reports"
 
 
+def _oos_line() -> str | None:
+    f = REPORTS / "backtest.json"
+    if not f.exists():
+        return None
+    ev = json.loads(f.read_text(encoding="utf-8"))["eval"]
+    s = ev.get("summary") or {}
+    if not s.get("n"):
+        return ev.get("verdict")
+    return (f"{ev['verdict']} · {s['n']} ไม้ · expectancy {s['expectancy_pct']:+.3f}% · PF {s['profit_factor']:.2f} · "
+            f"precision {ev['precision']*100:.0f}% (ดู reports/backtest.md)")
+
+
 def _save_forensic(res: dict, sym: str, bt: dict | None = None) -> None:
     REPORTS.mkdir(exist_ok=True)
+    if not sym.startswith("SYN"):
+        res["answers"]["oos_summary"] = _oos_line()
     md = forensic.to_markdown(res["answers"], DEFAULT)
     (REPORTS / f"{sym}_forensic.md").write_text(md, encoding="utf-8")
     ans = {k: v for k, v in res["answers"].items()}
@@ -55,6 +70,7 @@ def cmd_selftest(_a) -> None:
     print("\nฝังไว้:", json.dumps(truth, indent=1))
     day = truth["real"][0]["pump_start"][:10]
     res = forensic.run(raw, DEFAULT, focus_start=day, focus_end=day, symbol="SYNTHETIC")
+    res["answers"]["lag_sensitivity"] = forensic.lag_sensitivity(raw, DEFAULT, day, day)
     _save_forensic(res, "SYNTHETIC")
 
     print("\n=== walk-forward บนข้อมูลสังเคราะห์: มี edge vs ไม่มี edge ===")
@@ -78,7 +94,55 @@ def cmd_forensic(a) -> None:
     if not len(raw["fut_kl"]):
         sys.exit(f"ยังไม่มีข้อมูล {a.symbol} — รัน: python run.py fetch --symbol {a.symbol} ...")
     res = forensic.run(raw, DEFAULT, a.focus_start, a.focus_end, symbol=a.symbol)
+    print("ทดสอบความไวต่อ OI lag 0/5/10/15/30 นาที ...")
+    res["answers"]["lag_sensitivity"] = forensic.lag_sensitivity(raw, DEFAULT, a.focus_start, a.focus_end)
     _save_forensic(res, a.symbol)
+
+
+def cmd_oi_latency(a) -> None:
+    """
+    วัดจริงว่า OI 5m ของ Binance 'เผยแพร่' ช้ากว่า timestamp กี่นาที และ timestamp หมายถึงต้นหรือปลายช่วง
+    - poll openInterestHist (5m) ทุก a.every วินาที บันทึกเวลาที่แถวใหม่ปรากฏครั้งแรก
+    - poll openInterest (real-time) คู่กัน เพื่อเทียบว่าค่าในแถว T ตรงกับ real-time ณ เวลาใด
+    """
+    import time as _t
+    import urllib.parse
+    seen, rt, rows = {}, [], []
+    end = _t.time() + a.minutes * 60
+    print(f"วัด {a.symbol} {a.minutes} นาที (ปล่อยรันไว้) ...")
+    while _t.time() < end:
+        now = pd.Timestamp.now(tz="UTC")
+        try:
+            q = urllib.parse.urlencode({"symbol": a.symbol, "period": "5m", "limit": 3})
+            for r in fetch._http(f"{fetch.FAPI}/futures/data/openInterestHist?{q}") or []:
+                ts = pd.Timestamp(r["timestamp"], unit="ms", tz="UTC")
+                if ts not in seen:
+                    seen[ts] = (now, float(r["sumOpenInterest"]))
+            o = fetch._http(f"{fetch.FAPI}/fapi/v1/openInterest?symbol={a.symbol}")
+            if o:
+                rt.append((pd.Timestamp(o["time"], unit="ms", tz="UTC"), float(o["openInterest"])))
+        except Exception as e:  # noqa: BLE001
+            print("  error:", e)
+        _t.sleep(a.every)
+    first_poll = min(v[0] for v in seen.values()) if seen else None
+    rts = pd.Series({t: v for t, v in rt}).sort_index()
+    for ts, (when, oi) in sorted(seen.items()):
+        if first_poll is not None and when <= first_poll + pd.Timedelta(seconds=a.every * 1.5):
+            continue  # แถวที่มีอยู่แล้วตอนเริ่มวัด ไม่รู้ว่าปรากฏเมื่อไร
+        near = rts.iloc[(abs(rts.index - ts)).argsort()[:1]] if len(rts) else pd.Series(dtype=float)
+        near_end = rts.iloc[(abs(rts.index - (ts + pd.Timedelta(minutes=5)))).argsort()[:1]] if len(rts) else pd.Series(dtype=float)
+        rows.append({"timestamp": ts, "first_seen": when,
+                     "latency_min": round((when - ts).total_seconds() / 60, 2), "hist_oi": oi,
+                     "rt_oi_at_ts": float(near.iloc[0]) if len(near) else None,
+                     "rt_oi_at_ts+5m": float(near_end.iloc[0]) if len(near_end) else None})
+    df = pd.DataFrame(rows)
+    REPORTS.mkdir(exist_ok=True)
+    df.to_csv(REPORTS / f"oi_latency_{a.symbol}.csv", index=False)
+    print(df.to_string())
+    if len(df):
+        print(f"\nlatency: median {df['latency_min'].median():.2f} นาที · max {df['latency_min'].max():.2f} นาที")
+        print("ถ้า hist_oi ใกล้ rt_oi_at_ts มากกว่า rt_oi_at_ts+5m -> timestamp = เวลา snapshot (ไม่ใช่ปลายช่วง)")
+        print(f"ตั้ง oi_lag_min ใน config.py ให้ >= max latency (ปัดขึ้น) → ตอนนี้ตั้งไว้ {DEFAULT.data.oi_lag_min}")
 
 
 def cmd_universe(a) -> None:
@@ -143,9 +207,13 @@ def main() -> None:
     b.add_argument("--symbols")
     b.add_argument("--exclude", help="เช่น ESPORTSUSDT — กันเหรียญที่ใช้ออกแบบสูตรไม่ให้ปนใน OOS")
     b.add_argument("--train-months", type=int, default=2)
+    o = sp.add_parser("oi-latency")
+    o.add_argument("--symbol", default="BTCUSDT")
+    o.add_argument("--minutes", type=int, default=60)
+    o.add_argument("--every", type=int, default=10)
     a = ap.parse_args()
     {"selftest": cmd_selftest, "fetch": cmd_fetch, "forensic": cmd_forensic,
-     "universe": cmd_universe, "backtest": cmd_backtest}[a.cmd](a)
+     "universe": cmd_universe, "backtest": cmd_backtest, "oi-latency": cmd_oi_latency}[a.cmd](a)
 
 
 if __name__ == "__main__":
