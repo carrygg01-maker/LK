@@ -37,17 +37,30 @@ def _combos() -> list[dict]:
     return [dict(zip(keys, v)) for v in itertools.product(*[WF_GRID[k] for k in keys])]
 
 
-def prepare(symbols: list[str], loader, cfg: Cfg) -> dict:
-    """features + labels ต่อเหรียญ (labels ใช้แค่ประเมิน)"""
+KEEP_COLS = ["open", "high", "low", "close", "oi_chg", "fut_cvd_z", "spot_cvd_z", "rvol", "ret_ext", "spot_qv"]
+
+
+def prepare(symbols: list[str], loader, cfg: Cfg, cut_before: str | None = None) -> dict:
+    """
+    features + labels ต่อเหรียญ (labels ใช้แค่ประเมิน)
+    cut_before: ตัดข้อมูลดิบตาม 'เวลาเผยแพร่' ก่อนสร้าง feature -> ช่วง test ไม่ถูกแตะเลยแม้แต่ไบต์เดียว
+    เก็บเฉพาะคอลัมน์ที่ใช้เป็น float32 เพื่อให้ 100+ เหรียญพอดี RAM 16GB
+    """
     out = {}
+    cut = pd.Timestamp(cut_before, tz="UTC") if cut_before else None
     for s in symbols:
         try:
             raw = loader(s)
+            if cut is not None:
+                raw = features.visible_raw(raw, cut, cfg)
             b = features.build(raw, cfg)
         except Exception as e:  # noqa: BLE001
             print(f"  ข้าม {s}: {e}")
             continue
-        out[s] = {"bars": b, "eps": labels.episodes(b, cfg)}
+        has_spot = bool(b["spot_qv"].notna().any())
+        unk_state = signals.alert_state(signals.components(b, cfg), signals.unknown(b), cfg, has_spot) == "UNKNOWN"
+        eps = labels.episodes(b, cfg)
+        out[s] = {"bars": b[KEEP_COLS].astype("float32"), "eps": eps, "unknown": unk_state.to_numpy()}
     return out
 
 
@@ -165,6 +178,67 @@ def walk_forward(prep: dict, cfg: Cfg, min_train_months: int = 2) -> dict:
                       "test_mean_net_pct": round(float(tst["net_pct"].mean()), 3) if len(tst) else None})
     oos_df = pd.concat(oos, ignore_index=True) if oos else pd.DataFrame()
     return {"folds": folds, "oos": oos_df, "combos": combos}
+
+
+def final_test(prep: dict, cfg: Cfg, train_start: str, test_start: str, test_end: str) -> dict:
+    """
+    เลือกเกณฑ์ครั้งเดียวจาก train+validation (เทรดต้องปิดก่อน test_start) แล้วทดสอบช่วง test ครั้งเดียว
+    """
+    combos = _combos()
+    t0, ts = pd.Timestamp(train_start, tz="UTC"), pd.Timestamp(test_start, tz="UTC")
+    te = pd.Timestamp(test_end, tz="UTC") + pd.Timedelta(days=1)
+    best_i, best, best_n, per = None, -np.inf, 0, {}
+    for i, c in enumerate(combos):
+        tr = _run_combo(prep, cfg.with_signal(**c))
+        per[i] = tr
+        if not len(tr):
+            continue
+        dev = tr[(tr["entry_time"] >= t0) & (tr["exit_time"] < ts)]
+        if len(dev) >= MIN_TRAIN_TRADES and dev["net_pct"].mean() > best:
+            best_i, best, best_n = i, dev["net_pct"].mean(), len(dev)
+    if best_i is None:
+        return {"chosen": None, "oos": pd.DataFrame()}
+    tr = per[best_i]
+    oos = tr[(tr["entry_time"] >= ts) & (tr["entry_time"] < te)].copy()
+    oos["fold"] = oos["entry_time"].dt.strftime("%Y-%m")
+    # UNKNOWN share ในช่วง test
+    tot, unk = 0, 0
+    for d in prep.values():
+        idx = d["bars"].index
+        m = (idx >= ts) & (idx < te)
+        tot += int(m.sum())
+        unk += int(d["unknown"][m].sum())
+    return {"chosen": combos[best_i], "dev_n": best_n, "dev_mean_net_pct": float(best), "oos": oos,
+            "unknown_share": unk / tot if tot else None}
+
+
+INCONCLUSIVE_MAX_UNKNOWN = 0.05   # นาทีที่ alert = UNKNOWN เกิน 5% ของช่วง test -> พิสูจน์ไม่ได้
+INCONCLUSIVE_MIN_READY = 0.80     # เหรียญใน universe ที่ข้อมูล ready ต้อง >= 80%
+
+
+def three_way(ev_main: dict, ev_cons: dict, ctx: dict) -> dict:
+    """PASS / FAIL / INCONCLUSIVE — INCONCLUSIVE ตัดสินก่อนเสมอ"""
+    inc = []
+    if ctx.get("drift"):
+        inc.append("โค้ด/เกณฑ์/ข้อมูลเปลี่ยนหลังล็อก manifest: " + "; ".join(ctx["drift"]))
+    if ctx.get("prior_test_runs", 0) > 0:
+        inc.append(f"ชุด test ถูกเปิดไปแล้ว {ctx['prior_test_runs']} ครั้ง — ไม่ใช่การทดสอบแบบปิดตา")
+    if ctx.get("ready_share") is not None and ctx["ready_share"] < INCONCLUSIVE_MIN_READY:
+        inc.append(f"เหรียญที่ข้อมูลพร้อม {ctx['ready_share']:.0%} < {INCONCLUSIVE_MIN_READY:.0%}")
+    for tag, ev in (("lag ปกติ", ev_main), ("lag อนุรักษนิยม", ev_cons)):
+        u = ev.get("unknown_share")
+        if u is not None and u > INCONCLUSIVE_MAX_UNKNOWN:
+            inc.append(f"[{tag}] นาทีที่ alert = UNKNOWN {u:.1%} > {INCONCLUSIVE_MAX_UNKNOWN:.0%}")
+        n = (ev.get("summary") or {}).get("n", 0)
+        if n < PASS_MIN_TRADES:
+            inc.append(f"[{tag}] เทรด OOS {n} < {PASS_MIN_TRADES} — n น้อยเกินจะสรุปได้")
+    if inc:
+        return {"verdict": "INCONCLUSIVE", "why": inc}
+    fails = [f"[{tag}] {k}" for tag, ev in (("lag ปกติ", ev_main), ("lag อนุรักษนิยม", ev_cons))
+             for k, v in ev.get("checks", {}).items() if not v]
+    if fails:
+        return {"verdict": "FAIL", "why": fails}
+    return {"verdict": "PASS", "why": ["ผ่านทุกเกณฑ์ที่ล็อกไว้ ทั้ง lag ปกติและอนุรักษนิยม ในชุด test ที่เปิดครั้งแรก"]}
 
 
 def evaluate(prep: dict, oos: pd.DataFrame, cfg: Cfg) -> dict:

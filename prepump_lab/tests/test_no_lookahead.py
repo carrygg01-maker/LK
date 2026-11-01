@@ -108,6 +108,34 @@ def test_metrics_math():
     assert abs(s["breakeven_win_rate"] - 5 / (15 + 5)) < 1e-9
 
 
+
+def test_gap_right_before_pump_is_unknown_not_false():
+    """95% ครบทั้งช่วง แต่ OI หาย 10 นาทีก่อนสัญญาณพอดี -> ต้องเป็น UNKNOWN/INCONCLUSIVE ไม่ใช่ FAIL"""
+    raw, truth = synthetic.make(days=14, seed=1)
+    day = truth["real"][0]["pump_start"][:10]
+    t = pd.Timestamp(truth["real"][0]["pump_start"])
+    m = raw["metrics"]
+    raw["metrics"] = m[(m.index < t - pd.Timedelta(minutes=55)) | (m.index > t - pd.Timedelta(minutes=40))]
+    res = forensic.run(raw, DEFAULT, day, day, symbol="X")
+    a = res["answers"]
+    assert a["lead_window_unknown_min"] > 0
+    a["lag_sensitivity"] = forensic.lag_sensitivity(raw, DEFAULT, day, day)
+    v = forensic.verdict(a, DEFAULT)
+    assert v["verdict"] in ("INCONCLUSIVE", "PASS"), v   # ห้ามเป็น FAIL เพราะข้อมูลขาด
+    if a["Q1_first_signal"] is None:
+        assert v["verdict"] == "INCONCLUSIVE", v
+
+
+def test_unknown_state():
+    raw, _ = synthetic.make(days=4, seed=3)
+    m = raw["metrics"]
+    raw["metrics"] = m.drop(m.index[500:503])            # หาย 15 นาที
+    b = features.build(raw, DEFAULT)
+    u = signals.unknown(b)
+    gap_t = m.index[502]
+    assert u.loc[gap_t:gap_t + pd.Timedelta(minutes=30), "oi_expansion"].any()
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

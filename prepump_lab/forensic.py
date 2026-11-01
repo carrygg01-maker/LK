@@ -77,6 +77,9 @@ def run(raw: dict[str, pd.DataFrame], cfg: Cfg, focus_start: str | None = None,
         focus_end: str | None = None, symbol: str = "") -> dict:
     b = features.build(raw, cfg)
     comp = signals.components(b, cfg)
+    unk = signals.unknown(b)
+    has_spot = bool(b["spot_qv"].notna().any())
+    state = signals.alert_state(comp, unk, cfg, has_spot)
     al = signals.alerts(comp, cfg)
     eps = labels.episodes(b, cfg)
     cls = labels.classify(al, eps, cfg)
@@ -118,11 +121,15 @@ def run(raw: dict[str, pd.DataFrame], cfg: Cfg, focus_start: str | None = None,
             ans["price_at_signal"] = float(b.loc[first, "close"])
             ans["signal_drivers"] = drivers(comp, first)
         ans["near_miss"] = near_miss(b, main, cfg)
+        lb = state.loc[main.breakout_time - lw: main.breakout_time]
+        ans["lead_window_unknown_min"] = int((lb == "UNKNOWN").sum())
+        ans["lead_window_unknown_by_feature"] = {signals.LABELS_TH[k]: int(v) for k, v in
+                                                 unk.loc[lb.index].sum().items() if v}
     ans["all_trades_summary"] = sim.summarize(trades)
     rb = random_baseline(b, len(trades), cfg)
     ans["random_baseline"] = {k: v for k, v in rb.items() if not k.startswith("_")}
     ans["classification_counts"] = cls["kind"].value_counts().to_dict() if len(cls) else {}
-    return {"answers": ans, "bars": b, "components": comp, "alerts": al, "classes": cls,
+    return {"answers": ans, "bars": b, "components": comp, "state": state, "alerts": al, "classes": cls,
             "episodes": eps, "trades": trades}
 
 
@@ -171,9 +178,10 @@ def near_miss(b: pd.DataFrame, ep: labels.Episode, cfg: Cfg) -> list[dict]:
     return out
 
 
-def lag_sensitivity(raw: dict, cfg: Cfg, focus_start, focus_end, lags=(0, 5, 10, 15, 30)) -> list[dict]:
+def lag_sensitivity(raw: dict, cfg: Cfg, focus_start, focus_end, lags=None) -> list[dict]:
     """ผลขึ้นกับสมมติฐานเวลาเผยแพร่ OI แค่ไหน — ถ้า lag 0 ดีกว่า 15 มาก = ผลพึ่งการเห็น OI เร็ว"""
     from dataclasses import replace
+    lags = lags or sorted({0, 5, 10, 15, 30, cfg.data.oi_lag_min, cfg.data.oi_lag_conservative_min})
     rows = []
     for lag in lags:
         c = replace(cfg, data=replace(cfg.data, oi_lag_min=lag))
@@ -184,6 +192,41 @@ def lag_sensitivity(raw: dict, cfg: Cfg, focus_start, focus_end, lags=(0, 5, 10,
                      "false_before": a.get("Q3_false_before"), "first_trade_net_pct": t.get("net_pct"),
                      "all_n": s.get("n", 0), "all_expectancy_pct": s.get("expectancy_pct")})
     return rows
+
+
+def verdict(a: dict, cfg: Cfg) -> dict:
+    """
+    PASS / FAIL / INCONCLUSIVE สำหรับเหรียญเดียว (PASS = เฉพาะกรณีนี้ ยังไม่ใช่หลักฐานของกลยุทธ์)
+    INCONCLUSIVE มาก่อนเสมอ: ถ้าข้อมูลไม่พอ ห้ามสรุปว่าสูตรล้มเหลว
+    """
+    why = []
+    if not a.get("main_episode"):
+        return {"verdict": "INCONCLUSIVE", "why": ["ไม่พบการพุ่งตามนิยามในช่วงที่โฟกัส — ตรวจนิยาม/ช่วงเวลา"]}
+    dq = a.get("data_quality") or {}
+    if dq.get("status") == "not_ready":
+        why.append("ข้อมูลทั้งช่วงไม่พร้อม: " + "; ".join(dq.get("reasons", [])))
+    unk = a.get("lead_window_unknown_min", 0)
+    if unk and not a.get("Q1_first_signal"):
+        why.append(f"ใน 12 ชม.ก่อน breakout มี {unk} นาทีที่สถานะ alert = UNKNOWN "
+                   f"(ข้อมูลขาด: {a.get('lead_window_unknown_by_feature')}) — อาจมีสัญญาณที่มองไม่เห็น")
+    if any(r.get("cause") == "data" for r in a.get("near_miss", [])) and not a.get("Q1_first_signal"):
+        why.append("เงื่อนไขบางข้อขาดข้อมูลในช่วง lookback")
+    if why:
+        return {"verdict": "INCONCLUSIVE", "why": why}
+    if not a.get("Q1_first_signal"):
+        return {"verdict": "FAIL", "why": ["ข้อมูลครบ แต่ไม่มี alert ก่อน breakout"]}
+    cons = cfg.data.oi_lag_conservative_min
+    ls = {r["oi_lag_min"]: r for r in a.get("lag_sensitivity", [])}
+    if cons in ls and ls[cons]["lead_min"] is None:
+        return {"verdict": "FAIL", "why": [f"สัญญาณหายเมื่อ OI lag = {cons} นาที (อนุรักษนิยม) — พึ่งการเห็น OI เร็ว"]}
+    t = a.get("Q4_trade_on_first_signal")
+    tc = ls.get(cons, {}).get("first_trade_net_pct")
+    if not t or t["net_pct"] <= 0 or (tc is not None and tc <= 0):
+        return {"verdict": "FAIL", "why": ["มีสัญญาณนำ แต่เทรดตามสัญญาณแรกไม่คุ้มต้นทุน (ที่ lag ปกติหรืออนุรักษนิยม)"]}
+    if cons not in ls:
+        return {"verdict": "INCONCLUSIVE", "why": ["ยังไม่ได้รันที่ lag อนุรักษนิยม"]}
+    return {"verdict": "PASS", "why": ["มีสัญญาณนำและกำไรหลังต้นทุน ทั้งที่ lag ปกติและอนุรักษนิยม",
+                                       "เป็นผลของเหรียญเดียวที่รู้อยู่แล้วว่าพุ่ง — ต้องผ่าน Out-of-Sample ก่อนนับเป็นหลักฐาน"]}
 
 
 def evidence(b: pd.DataFrame, comp: pd.DataFrame, t: pd.Timestamp) -> list[dict]:
@@ -220,11 +263,21 @@ def to_markdown(ans: dict, cfg: Cfg) -> str:
                  + (" ⚠️ ต่ำกว่า 80% — ผลช่วงนี้เชื่อถือได้น้อย" if min(fc.values()) < 0.8 else "") + "\n")
     me = a.get("main_episode")
     if not me:
+        if a.get("verdict"):
+            L.append(f"## Verdict: **{a['verdict']['verdict']}**\n")
         L.append("\n**ไม่พบการพุ่งที่เข้านิยามในช่วงที่โฟกัส** "
                  f"(นิยาม: low→peak ≥ {cfg.label.pump_gain*100:.0f}% ภายใน {cfg.label.pump_window//60} ชม.)\n")
         return "\n".join(L)
     L.append(f"\n## เหตุการณ์หลัก\n\nlow {me['low']:.6g} @ {me['low_time']} → breakout (+{cfg.label.breakout_gain*100:.0f}%) "
              f"@ **{me['breakout_time']}** → peak {me['peak']:.6g} @ {me['peak_time']} (**+{me['gain_pct']}%**)\n")
+    vd = a.get("verdict")
+    if vd:
+        L.append(f"## Verdict (เหรียญนี้): **{vd['verdict']}**\n")
+        L.extend(f"- {w}" for w in vd["why"])
+        L.append("")
+    if a.get("lead_window_unknown_min"):
+        L.append(f"⚠️ ใน 12 ชม.ก่อน breakout มี {a['lead_window_unknown_min']} นาทีที่สถานะ alert = UNKNOWN "
+                 f"(ข้อมูลขาด: {a.get('lead_window_unknown_by_feature')})\n")
     t4 = a.get("Q4_trade_on_first_signal")
     dr = a.get("signal_drivers") or {}
     oos = a.get("oos_summary")

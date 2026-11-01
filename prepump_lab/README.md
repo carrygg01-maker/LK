@@ -30,16 +30,45 @@ python run.py forensic --symbol ESPORTSUSDT --focus-start 2026-10-25 --focus-end
 - เปิดไฟล์ `reports/ESPORTSUSDT_replay.html` → เลื่อนเวลาไปก่อน breakout แล้วดูว่า scanner เห็นอะไร
 - ⚠️ **OI 5 นาทีผ่าน REST ย้อนหลังได้แค่ ~30 วัน** วันไหนที่ Vision ยังไม่ออกไฟล์ metrics ต้องดึงภายใน 30 วัน ไม่งั้นหายถาวร
 
-### Phase 2–3 — หลายเหรียญ + Walk-Forward
+### Phase 2–3 — ล็อกการทดลองก่อน แล้วค่อยทดสอบ
 
 ```bash
 python run.py universe --start 2026-03-01 --end 2026-10-31 --max 120
-python run.py backtest --exclude ESPORTSUSDT
+python run.py lock --name exp1 --train-start 2026-03-01 --val-start 2026-07-01 --test-start 2026-09-01 --test-end 2026-10-31
+git add experiments/exp1.json && git commit -m "lock exp1"
+python run.py backtest --manifest experiments/exp1.json              # DEV: ใช้ train+validation เท่านั้น ปรับปรุงได้
+python run.py backtest --manifest experiments/exp1.json --open-test  # เปิดชุด test — นับจริงแค่ครั้งแรก
 ```
 
-- `universe` ดึงรายชื่อจาก Vision (**รวมเหรียญที่ delist แล้ว**) แล้วสุ่มลำดับคงที่ — ไม่เลือกจาก top gainers
-- `--exclude ESPORTSUSDT` เพราะเหรียญที่ใช้ออกแบบสูตรห้ามอยู่ในชุดทดสอบ
-- 1m klines 120 เหรียญ × 8 เดือน ≈ 40M แถว ใช้ disk ~3–5 GB (ไม่ดึง aggTrades ใน Phase 2)
+- `universe` ดึงรายชื่อจาก Vision (**รวมเหรียญที่ delist แล้ว**) แล้วสุ่มลำดับแบบคงที่ ไม่เลือกจาก top gainers
+- `lock` สร้าง `experiments/<name>.json` ซึ่งระบุไว้ก่อนเห็นผลว่า:
+  - universe คือเหรียญไหนบ้าง
+  - design symbols (ค่าเริ่มต้นคือ ESPORTSUSDT) ซึ่งประกาศไว้ชัดเจนและไม่อยู่ใน universe
+  - ช่วงเวลา train / validation / test
+  - code hash, git commit, config ทั้งหมด และ data hash ของแต่ละเหรียญ
+  - สมมติฐานเรื่อง OI lag
+- ชุดทดสอบ**ไม่เปลี่ยนตามเหรียญที่เปิดดู** ถ้าเหรียญไหนข้อมูลไม่พร้อม จะไม่ถูกสลับเป็นเหรียญอื่น แต่จะนับรวมใน ready share
+- DEV mode ตัดข้อมูลดิบตามเวลาเผยแพร่ก่อน `test_start` ช่วง test จึงไม่ถูกแตะเลย
+- `--open-test` เลือกเกณฑ์จาก train+validation ครั้งเดียว แล้วทดสอบช่วง test ครั้งเดียว **ทั้งที่ lag ปกติและ lag อนุรักษนิยม**
+  - ทุกครั้งที่เปิด test จะถูกบันทึกต่อท้ายใน `test_runs`
+  - เปิดครั้งที่ 2 ขึ้นไป ผลจะเป็น INCONCLUSIVE
+  - ถ้าโค้ด, config หรือข้อมูลเปลี่ยนหลังล็อก ผลจะเป็น INCONCLUSIVE
+
+### คำตัดสิน 3 แบบ
+
+| Verdict | เงื่อนไข (ตรวจตามลำดับ) |
+|---|---|
+| **INCONCLUSIVE** | มี drift / test เคยเปิดแล้ว / เหรียญที่ข้อมูลพร้อม < 80% / นาทีที่ alert เป็น UNKNOWN > 5% / เทรด OOS < 100 |
+| **FAIL** | ข้อมูลครบ แต่ไม่ผ่านเกณฑ์ใดเกณฑ์หนึ่ง ที่ lag ปกติ **หรือ** lag อนุรักษนิยม |
+| **PASS** | ผ่านทุกเกณฑ์ทั้งสอง lag ในการเปิด test ครั้งแรก |
+
+Forensic ของเหรียญเดียวใช้ 3 ระดับเดียวกัน แต่ PASS ในระดับนี้หมายถึง "ผ่านเฉพาะกรณีนี้" ยังไม่ใช่หลักฐานของกลยุทธ์
+
+### UNKNOWN ≠ FALSE
+
+- feature จะเป็น UNKNOWN ถ้า lookback window ขาดข้อมูลแม้แต่นาทีเดียว เช่น แท่ง 1m หายในช่วง 60 นาทีของ CVD, OI snapshot หาย (ค่าล่าสุดเก่ากว่า 9 นาที) หรือ baseline 24 ชม. มีข้อมูลต่ำกว่า 90%
+- ในแต่ละนาที สถานะ alert เป็น ALERT / NO / UNKNOWN โดย UNKNOWN หมายถึง "เงื่อนไขที่รู้ค่าผ่านหมด แต่มีบางข้อที่คำนวณไม่ได้"
+- ถ้าไม่มีสัญญาณก่อน breakout แต่มีนาที UNKNOWN ในช่วงนั้น ผลจะเป็น **INCONCLUSIVE ไม่ใช่ FAIL** แม้ coverage ทั้งช่วงจะเป็น 95% ก็ตาม
 
 ---
 
@@ -95,7 +124,7 @@ Binance ไม่ได้ระบุในเอกสารว่า OI 5 น
 
 1. ค่าเริ่มต้นตั้ง lag ไว้ 5 นาที
 2. `forensic` รันซ้ำด้วย lag 0/5/10/15/30 นาที แล้วรายงานว่าผลเปลี่ยนไปแค่ไหน
-3. วัดค่าจริงด้วย `python run.py oi-latency --symbol ESPORTSUSDT --hours 48` ซึ่งจะ poll ทั้ง API ย้อนหลังและ API real-time แล้วบันทึกว่า
+3. วัดค่าจริง (เครื่องต้องเปิด NTP; ระบบเทียบนาฬิกากับ `/fapi/v1/time` ทุกรอบและแก้ offset ให้ในแต่ละแถว) ด้วย `python run.py oi-latency --symbol ESPORTSUSDT --hours 48` ซึ่งจะ poll ทั้ง API ย้อนหลังและ API real-time แล้วบันทึกว่า
    - แถวใหม่ปรากฏช้ากว่า timestamp กี่นาที
    - ค่าในแถวตรงกับ OI real-time ณ ต้นช่วงหรือปลายช่วง 5 นาที
 
@@ -111,8 +140,7 @@ Binance ไม่ได้ระบุในเอกสารว่า OI 5 น
 
 ### กัน ESPORTS รั่วเข้า Out-of-Sample
 
-- `backtest` ตัดทุกเหรียญที่มี `reports/<SYM>_forensic.json` ออกอัตโนมัติ (ต้องสั่ง `--include-forensic` ถึงจะใส่กลับ)
-- forensic บันทึก hash ของ `config.py` ถ้า config เปลี่ยนหลังทำ forensic backtest จะเตือนว่าเกณฑ์อาจถูกปรับจากผลเหรียญนั้น
+- ใช้ `design_symbols` ใน manifest ที่ประกาศไว้ล่วงหน้า (ไม่ตัดเหรียญตามไฟล์ forensic ที่เปิดดู — แบบนั้นทำให้ชุดทดสอบเปลี่ยนตามการใช้งาน)
 - CI ใช้สองวิธี (cluster bootstrap รายวัน + moving-block bootstrap ตามเวลา) แล้วตัดสินด้วยขอบล่างที่ต่ำกว่า
 
 ---

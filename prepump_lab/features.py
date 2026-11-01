@@ -19,6 +19,8 @@ import pandas as pd
 from config import Cfg
 
 ONE_MIN = pd.Timedelta(minutes=1)
+OI_MAX_STALE_MIN = 9
+BASELINE_MIN_COVERAGE = 0.9   # baseline 24 ชม. ต้องมีข้อมูล >= 90% ไม่งั้น z/rvol = UNKNOWN
 
 
 def publish_time(name: str, idx: pd.DatetimeIndex, cfg: Cfg) -> pd.DatetimeIndex:
@@ -42,8 +44,9 @@ def visible_raw(raw: dict[str, pd.DataFrame], asof: pd.Timestamp, cfg: Cfg) -> d
 
 def _z(x: pd.Series, w: int) -> pd.Series:
     # baseline เลื่อน 1 แถว -> ค่าปัจจุบันไม่ปนใน mean/std ของตัวเอง
-    m = x.rolling(w, min_periods=w // 2).mean().shift(1)
-    s = x.rolling(w, min_periods=w // 2).std().shift(1)
+    mp = int(w * BASELINE_MIN_COVERAGE)
+    m = x.rolling(w, min_periods=mp).mean().shift(1)
+    s = x.rolling(w, min_periods=mp).std().shift(1)
     return (x - m) / s.replace(0, np.nan)
 
 
@@ -60,6 +63,7 @@ def build(raw: dict[str, pd.DataFrame], cfg: Cfg) -> pd.DataFrame:
     b["low"] = fk["low"].fillna(b["close"])
     # Binance ออกแท่งทุกนาทีแม้ volume=0 -> แถวที่หาย = ข้อมูลขาด ให้เป็น NaN (ไม่ใช่ 0 ที่ดูเหมือนตลาดเงียบ)
     b["kl_missing"] = fk["close"].isna()
+    b["close_raw"] = fk["close"]          # ไม่ ffill — ใช้คำนวณ feature (ราคาที่เติมไว้ใช้แค่จำลองเทรด)
     b["qv"] = fk["quote_volume"]
     b["fut_delta"] = 2 * fk["taker_buy_quote"] - fk["quote_volume"]
 
@@ -81,9 +85,10 @@ def build(raw: dict[str, pd.DataFrame], cfg: Cfg) -> pd.DataFrame:
         avail = publish_time("metrics", m.index, cfg)
         mm = pd.DataFrame({"avail": avail, "oi": m["sum_open_interest"].values,
                            "oi_usd": m["sum_open_interest_value"].values}).sort_values("avail")
-        # tolerance: ถ้า OI ล่าสุดเก่ากว่า 15 นาที (ข้อมูลขาด) ให้เป็น NaN — ห้ามเติมค่าเก่าจนดูเหมือน "OI นิ่ง"
+        # tolerance: OI ออกทุก 5 นาที ถ้าค่าล่าสุดเก่ากว่า 9 นาที = มี snapshot หาย -> NaN (UNKNOWN)
+        # ห้ามเติมค่าเก่าจนดูเหมือน "OI นิ่ง"
         j = pd.merge_asof(pd.DataFrame({"decide": decide}), mm, left_on="decide",
-                          right_on="avail", direction="backward", tolerance=pd.Timedelta(minutes=15))
+                          right_on="avail", direction="backward", tolerance=pd.Timedelta(minutes=OI_MAX_STALE_MIN))
         b["oi"] = j["oi"].values
         b["oi_usd"] = j["oi_usd"].values
     else:
@@ -117,8 +122,11 @@ def add_features(b: pd.DataFrame, cfg: Cfg) -> pd.DataFrame:
     s = cfg.signal
     W = s.baseline
     b = b.copy()
-    b["ret_ext"] = b["close"] / b["close"].shift(s.ext_window) - 1
-    b["oi_chg"] = b["oi"] / b["oi"].shift(s.oi_window) - 1
+    # ทุก feature = NaN (UNKNOWN) ถ้า lookback window มีข้อมูลขาดแม้แต่นาทีเดียว
+    cr = b["close_raw"]
+    b["ret_ext"] = cr / cr.shift(s.ext_window) - 1
+    oi_ok = b["oi"].notna().astype(int).rolling(s.oi_window + 1, min_periods=1).sum() == s.oi_window + 1
+    b["oi_chg"] = (b["oi"] / b["oi"].shift(s.oi_window) - 1).where(oi_ok)
 
     fut_cvd = b["fut_delta"].rolling(s.cvd_window, min_periods=s.cvd_window).sum()
     spot_cvd = b["spot_delta"].rolling(s.cvd_window, min_periods=s.cvd_window).sum()
@@ -128,7 +136,7 @@ def add_features(b: pd.DataFrame, cfg: Cfg) -> pd.DataFrame:
     b["spot_cvd_z"] = _z(spot_cvd, W)
 
     rv = b["qv"].rolling(s.rv_window, min_periods=s.rv_window).sum()
-    base = rv.rolling(W, min_periods=W // 2).median().shift(1)
+    base = rv.rolling(W, min_periods=int(W * BASELINE_MIN_COVERAGE)).median().shift(1)
     b["rvol"] = rv / base.replace(0, np.nan)
 
     # CVD สะสมแบบต่อเนื่องสำหรับกราฟ (ไม่ใช้ในสัญญาณ)
