@@ -5,3 +5,5 @@ edge_lab/results.csv
 edge_lab/collect.log
 edge_lab/*.parquet
 edge_lab/cache/
+prepump_lab/data/
+prepump_lab/reports/
