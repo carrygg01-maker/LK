@@ -26,12 +26,16 @@ MAX_PAGES = 40
 UA = 'ElementTable/1.0 (menu research for personal use)'
 KNOWN_CATALOGS = [  # (name pattern, catalog start URLs)
     (re.compile(r'7\s*-?\s*(11|eleven)|เซเว่น|เซเว่นอีเลฟเว่น', re.I),
-     ['https://www.7eleven.co.th/new-product/']),
+     ['https://www.7eleven.co.th/new-product']),
 ]
 INGREDIENT_WORDS = ['ข้าว', 'ไข่', 'ไก่', 'หมู', 'เนื้อ', 'กุ้ง', 'ปลา', 'ปู', 'หมึก', 'แฮม', 'เบคอน', 'ไส้กรอก',
     'ชีส', 'เนย', 'นม', 'นมสด', 'กะทิ', 'มะพร้าว', 'ผักโขม', 'คะน้า', 'บรอกโคลี', 'มะเขือเทศ', 'ฟักทอง', 'ข้าวโพด',
     'เห็ด', 'เต้าหู้', 'ถั่วเหลือง', 'งา', 'งาดำ', 'ถั่วดำ', 'สาหร่าย', 'กล้วย', 'ช็อกโกแลต', 'ขนมปัง', 'แป้ง',
-    'พริก', 'กระเทียม', 'ขิง', 'โหระพา', 'กะเพรา', 'อะโวคาโด', 'มันเทศ']
+    'พริก', 'กระเทียม', 'ขิง', 'โหระพา', 'กะเพรา', 'กระเพรา', 'อะโวคาโด', 'มันเทศ', 'ไรซ์เบอร์รี่', 'ข้าวหอมมะลิ',
+    'ข้าวญี่ปุ่น', 'แครอท', 'ถั่วฝักยาว', 'ข้าวโพดอ่อน', 'มอสซาเรลล่า', 'เชดด้า', 'พาเมซาน', 'มายองเนส', 'โคชูจัง',
+    'ต๊อกบกกี', 'กุนเชียง', 'เห็ดหอม', 'ไข่แดงเค็ม', 'ปูอัด', 'ลูกชิ้นปลา', 'ปลาสลิด', 'ยอดมะพร้าว', 'ขึ้นฉ่าย',
+    'ข่า', 'ตะไคร้', 'มะเขือ', 'นูเทลล่า', 'เฮเซลนัท', 'กาแฟ', 'มัทฉะ', 'ชาเขียว', 'ชา', 'น้ำผึ้ง', 'มะนาว', 'โซดา',
+    'คาราเมล', 'เปปเปอร์มินต์', 'ถั่วแระ', 'พริกไทยดำ', 'พริกไทย', 'ซอสมะเขือเทศ']
 lock = threading.Lock()
 
 
@@ -69,7 +73,8 @@ def public_host(url):
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
                 return False
     except socket.gaierror:
-        return False
+        # Behind an HTTP(S) proxy the name may only resolve at the proxy; let the proxy decide.
+        return bool(os.environ.get('HTTPS_PROXY') or os.environ.get('https_proxy'))
     return True
 
 
@@ -99,19 +104,29 @@ def price_of(s):
     return float(m.group(1) or m.group(2)) if m else None
 
 
+# Thai has no spaces between words, so a few short words need context to avoid false hits
+# (คาปูชิโน่ is not crab, ขนม is not milk, กับข้าว is not rice, เนื้อนุ่ม is texture, พลังงาน is not sesame).
+WORD_RULES = {
+    'ปู': r'(?<!คา)ปู(?!ชิ)', 'นม': r'(?<!ข)นม', 'ข้าว': r'(?<!กับ)ข้าว(?!โพด)', 'งา': r'งา(?![นม])',
+    'ชา': r'ชา(?=เขียว|นม|มะนาว|ไทย|ดำ|\b)|^ชา', 'ไข่': r'(?<!กล้วย)ไข่', 'เนื้อ': r'เนื้อ(?=วัว|สัตว์)',
+    'ปลา': r'(?<!น้ำ)ปลา', 'แป้ง': r'แป้ง(?!เอแคลร์)', 'ข่า': r'(?<![ก-๙])ข่า|ต้มข่า',
+    'มะเขือ': r'มะเขือ(?!เทศ)', 'พริกไทย': r'พริกไทย(?!ดำ)', 'ข้าวโพด': r'ข้าวโพด(?!อ่อน)',
+}
+MEATS = {'ไก่', 'หมู', 'เนื้อ', 'กุ้ง', 'ปลา', 'ปู', 'หมึก', 'แฮม', 'เบคอน', 'ไส้กรอก', 'กุนเชียง', 'ไข่', 'ไข่แดงเค็ม',
+         'ปูอัด', 'ลูกชิ้นปลา', 'ปลาสลิด'}
+
+
 def ingredients_of(s):
-    found = []
-    s = (s or '').replace('กล้วยไข่', 'กล้วย')  # banana variety, not egg
-    for w in INGREDIENT_WORDS:
-        if w in s and not any(w in f for f in found):
-            found.append(w)
-    return found
+    s = s or ''
+    found = [w for w in INGREDIENT_WORDS if re.search(WORD_RULES.get(w, re.escape(w)), s)]
+    # drop a word when a longer found word already contains it (นมสด covers นม)
+    return [w for w in found if not any(w != f and w in f for f in found)]
 
 
 def role_of(name):
     if re.search(r'น้ำ(?!พริก|ซุป|ปลา)|ชา|กาแฟ|นม(?!ปัง)|โกโก้|เครื่องดื่ม|โซดา|drink|tea|coffee|juice', name, re.I):
         return 'drink'
-    if re.search(r'ขนม|เค้ก|คุกกี้|ไอศกรีม|ของว่าง|snack|dessert|ผลไม้', name, re.I):
+    if re.search(r'ขนม(?!จีบ)|เค้ก|คุกกี้|ไอศกรีม|ของว่าง|เอแคลร์|ปังปิ้ง|กล้วย|ถั่วแระ|snack|dessert|ผลไม้', name, re.I):
         return 'side'
     return 'main'
 
@@ -122,6 +137,50 @@ def item(name, price=None, desc='', url=''):
     return {'name': name, 'price': price, 'currency': 'THB', 'ingredients': ings, 'ingredientsKnown': False,
             'element': None, 'role': role_of(name), 'vegetarian': None, 'origin': 'source',
             'sourceUrl': url, 'observedAt': now(), 'description': text(desc)[:300]}
+
+
+
+
+def nextdata_items(page, url):
+    """7-Eleven Thailand (Next.js): product lists live in __NEXT_DATA__ pageProps.<category>.items."""
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', page, re.S)
+    if not m:
+        return []
+    try:
+        props = json.loads(m.group(1))['props']['pageProps']
+    except (ValueError, KeyError, TypeError):
+        return []
+    base = f'{urlparse(url).scheme}://{urlparse(url).netloc}'
+    links = {h.split('/')[3].split('-')[0]: h for h in re.findall(r'href="(/new-product/[^/"]+/[^"]+)"', page)}
+    raw = []
+    for cat, block in props.items():
+        if not isinstance(block, dict) or not isinstance(block.get('items'), list) or cat in ('heroBanner', 'recommended'):
+            continue
+        for it in block['items']:
+            if not isinstance(it, dict) or not it.get('title_th') or it.get('is_active') == 0:
+                continue
+            detail = text(it.get('detail_th') or '')
+            prices = [float(x) for x in re.findall(r'ราคา\s*:?\s*(\d{1,4})\s*บาท', detail)]
+            try:
+                price = float(it['price']) if it.get('price') else (min(prices) if prices else None)
+            except (TypeError, ValueError):
+                price = min(prices) if prices else None
+            size = re.search(r'(\d{1,2})\s*oz', detail)
+            raw.append((cat, it, detail, price, size and f'{size.group(1)} oz', len(set(prices)) > 1))
+    names = [text(x[1]['title_th']) for x in raw]
+    out = []
+    for (cat, it, detail, price, size, multi), name in zip(raw, names):
+        if names.count(name) > 1 and size:
+            name = f'{name} {size}'
+        desc = text(it.get('desc_th') or '') + ' ' + detail
+        m_ = item(name, price, desc[:600], base + links.get(str(it['id']), f'/new-product/{cat}'))
+        m_['role'] = 'drink' if cat == 'drink' else ('side' if role_of(name) == 'side' else 'main')
+        m_['vegetarian'] = False if MEATS & set(ingredients_of(name + ' ' + desc)) or 'ซีฟู้ด' in name else None
+        if multi:
+            m_['priceNote'] = 'มีหลายขนาด ราคาเริ่มต้น'
+        m_['category'] = cat
+        out.append(m_)
+    return out
 
 
 def jsonld_items(page, url):
@@ -199,6 +258,10 @@ def research(start_urls):
             continue
         pages += 1
         seen.add(real)
+        catalog = nextdata_items(page, real)
+        if catalog:
+            add(catalog)
+            continue
         direct = jsonld_items(page, real)
         add(direct)
         links = catalog_links(page, real)
@@ -362,11 +425,24 @@ class Handler(SimpleHTTPRequestHandler):
         return self.send_json({'error': 'not found'}, 404)
 
 
+def snapshot_7eleven(out):
+    """Write the 7-Eleven catalog to a JS file the static page (no server) can load."""
+    menus, pages = research(KNOWN_CATALOGS[0][1])
+    body = {'fetchedAt': now(), 'source': KNOWN_CATALOGS[0][1][0], 'menus': menus}
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write('/* Generated by: python3 server.py --snapshot-7eleven seven-eleven-catalog.js */\n')
+        f.write('window.SEVEN_ELEVEN_CATALOG=' + json.dumps(body, ensure_ascii=False, indent=0) + ';\n')
+    print(f'{len(menus)} menus from {pages} page(s) -> {out}')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', type=int, default=8000)
     ap.add_argument('--host', default='127.0.0.1')
+    ap.add_argument('--snapshot-7eleven', metavar='OUT', help='write the 7-Eleven catalog for the static page and exit')
     a = ap.parse_args()
+    if a.snapshot_7eleven:
+        return snapshot_7eleven(a.snapshot_7eleven)
     threading.Thread(target=scheduler, daemon=True).start()
     print(f'ธาตุ & จาน: http://{a.host}:{a.port}  (data: {DATA})')
     ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
