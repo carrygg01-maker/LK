@@ -18,8 +18,12 @@ const load=()=>{try{const v=JSON.parse(localStorage.getItem(KEY));if(Array.isArr
 const save=v=>{try{localStorage.setItem(KEY,JSON.stringify(v))}catch{}};
 const json=(b,status=200)=>new Response(JSON.stringify(b),{status,headers:{'Content-Type':'application/json'}});
 const real=window.fetch.bind(window);
+// Use the real backend (server.py) when it answers /api/health; otherwise keep everything in this browser.
+let mode=null;const detect=async()=>{if(mode)return mode;try{const r=await real('/api/health',{signal:AbortSignal.timeout(4000)});const j=r.ok?await r.json():{};mode=j.mode==='server'?'server':'local'}catch{mode='local'}window.ElementBackend=mode;window.dispatchEvent(new Event('backend-mode'));return mode};
+window.ElementBackendReady=detect();
 window.fetch=async(url,opt={})=>{
  const u=String(url); if(!u.startsWith('/api/'))return real(url,opt);
+ if(await detect()==='server')return real(url,opt);
  const path=u.slice(5), data=opt.body?JSON.parse(opt.body):null; let all=load();
  if(path==='restaurants'&&!data)return json({restaurants:all.filter(s=>!s.archived)});
  if(path==='restaurants'){
@@ -32,6 +36,6 @@ window.fetch=async(url,opt={})=>{
  if(path==='archive'){const s=all.find(x=>x.id===data.id);if(s)s.archived=true;save(all);return json({ok:true});}
  if(path==='refresh'){const list=all.filter(s=>!s.archived&&(!data.id||s.id===data.id));
   list.forEach(s=>{s.lastChecked=now()});save(all);
-  return json(data.id?{restaurant:list[0]}:{results:list});}
+  return json(data.id?{restaurant:list[0],mode:'local'}:{results:list,mode:'local'});}
  return json({error:'not found'},404);};
 })();
